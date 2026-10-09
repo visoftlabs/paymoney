@@ -1,0 +1,71 @@
+[workspace]
+members = ["core"]
+
+[workspace.dependencies]
+paymoney-core = { path = "core" }
+
+p3-air = { git = "https://github.com/visoftlabs/Plonky3", branch = "feat/paymoney" }
+p3-batch-stark = { git = "https://github.com/visoftlabs/Plonky3", branch = "feat/paymoney" }
+p3-field = { git = "https://github.com/visoftlabs/Plonky3", branch = "feat/paymoney" }
+p3-fri = { git = "https://github.com/visoftlabs/Plonky3", branch = "feat/paymoney" }
+p3-koala-bear = { git = "https://github.com/visoftlabs/Plonky3", branch = "feat/paymoney" }
+p3-lookup = { git = "https://github.com/visoftlabs/Plonky3", branch = "feat/paymoney" }
+p3-merkle-tree = { git = "https://github.com/visoftlabs/Plonky3", branch = "feat/paymoney" }
+p3-symmetric = { git = "https://github.com/visoftlabs/Plonky3", branch = "feat/paymoney" }
+p3-uni-stark = { git = "https://github.com/visoftlabs/Plonky3", branch = "feat/paymoney" }
+p3-circuit = { git = "https://github.com/visoftlabs/Plonky3-recursion", branch = "feat/paymoney", features = ["parallel"] }
+p3-circuit-prover = { git = "https://github.com/visoftlabs/Plonky3-recursion", branch = "feat/paymoney", features = ["parallel"] }
+p3-recursion = { git = "https://github.com/visoftlabs/Plonky3-recursion", branch = "feat/paymoney", features = ["parallel"] }
+tlsn = { git = "https://github.com/visoftlabs/tlsn", branch = "feat/paymoney", features = ["mozilla-certs", "hash-poseidon2-koalabear"] }
+
+futures = "0.3.34"
+http-body-util = "0.1.5"
+hyper = { version = "1.12.0", features = ["client", "http1"] }
+hyper-util = { version = "0.1.21", features = ["tokio"] }
+pest = "2.9.3"
+pest_derive = "2.9.3"
+rand = "0.10.3"
+rayon = "1.12.0"
+regex = "1.13.1"
+reqwest = { version = "0.13.5", features = ["json"] }
+rustls = "0.23.45"
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.151"
+serde_with = "3.24.0"
+thiserror = "2.0.21"
+tokio = { version = "1.53.2", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
+tokio-rustls = "0.26.6"
+tokio-util = { version = "0.7.20", features = ["compat", "rt"] }
+tracing = "0.1.44"
+tracing-subscriber = { version = "0.3.23", features = ["env-filter"] }
+url = { version = "2.5.8", features = ["serde"] }
+uuid = { version = "1.27.0", features = ["serde"] }
+wtransport = "0.7.2"
+
+[package]
+name = "paymoney"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+futures.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+paymoney-core.workspace = true
+regex.workspace = true
+reqwest.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_with.workspace = true
+thiserror.workspace = true
+tlsn.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+uuid.workspace = true
+wtransport.workspace = true

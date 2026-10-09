@@ -1,0 +1,27 @@
+[package]
+name = "paymoney-core"
+edition = "2024"
+
+[dependencies]
+p3-air.workspace = true
+p3-batch-stark.workspace = true
+p3-circuit.workspace = true
+p3-circuit-prover.workspace = true
+p3-field.workspace = true
+p3-fri.workspace = true
+p3-koala-bear.workspace = true
+p3-lookup.workspace = true
+p3-merkle-tree.workspace = true
+p3-recursion.workspace = true
+p3-symmetric.workspace = true
+p3-uni-stark.workspace = true
+pest.workspace = true
+pest_derive.workspace = true
+rand.workspace = true
+rayon.workspace = true
+serde.workspace = true
+regex.workspace = true
+serde_json.workspace = true
+serde_with.workspace = true
+thiserror.workspace = true
+tracing.workspace = true

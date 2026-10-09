@@ -1,0 +1,13 @@
+// RFC 8259 JSON whose top level is one array: the leaf's payload. A pair's value starts right
+// after its colon, as the circuit reads it.
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+
+payload = _{ SOI ~ array ~ EOI }
+array   = !{ "[" ~ (value ~ ("," ~ value)*)? ~ "]" }
+object  = !{ "{" ~ (pair ~ ("," ~ pair)*)? ~ "}" }
+pair    = ${ string ~ WHITESPACE* ~ ":" ~ value }
+value   = _{ string | number | object | array | literal }
+string  = ${ "\"" ~ inner ~ "\"" }
+inner   = @{ (!("\"" | "\\" | '\u{00}'..'\u{1f}') ~ ANY | "\\" ~ (("\"" | "\\" | "/" | "b" | "f" | "n" | "r" | "t") | "u" ~ ASCII_HEX_DIGIT{4}))* }
+number  = @{ "-"? ~ ("0" | ASCII_NONZERO_DIGIT ~ ASCII_DIGIT*) ~ ("." ~ ASCII_DIGIT+)? ~ (^"e" ~ ("+" | "-")? ~ ASCII_DIGIT+)? }
+literal = @{ "true" | "false" | "null" }
