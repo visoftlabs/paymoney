@@ -1,6 +1,6 @@
 use crate::{
     Error,
-    engine::{Config, E, F, FRI, Inputs, POSEIDON},
+    engine::{Config, D, DIGEST, E, F, FRI, Inputs, POSEIDON, RATE, WIDTH},
 };
 use p3_batch_stark::{
     BatchCommitments, BatchOpenedValues, BatchProof, proof::OpenedValuesWithLookups,
@@ -25,7 +25,7 @@ pub(crate) fn allocate(
     public_count: usize,
     bind: impl FnOnce(&mut CircuitBuilder<E>, &Inputs) -> Result<(), Error>,
 ) -> Result<(Inputs, Vec<NonPrimitiveOpId>), Error> {
-    let tables = trusted_batch_tables::<Config, 4>(verifier, &vec![F::ZERO; public_count])?;
+    let tables = trusted_batch_tables::<Config, D>(verifier, &vec![F::ZERO; public_count])?;
     let common = verifier.common_data();
     let degrees = verifier.relation().trace_degree_bits();
     let mut instances = Vec::new();
@@ -46,19 +46,19 @@ pub(crate) fn allocate(
         let lookup_width = if lookups.is_empty() {
             0
         } else {
-            (lookups.len() + 1) * 4
+            (lookups.len() + 1) * D
         };
         let chunks = 1usize
             << (air.get_log_num_quotient_chunks(pre_width, 1 << (degree - 1), lookups, 1, &gadget)
                 + 1);
         let trace_next = <_ as RecursiveAir<F, E, LogUpGadget>>::opens_trace_next(air);
         let pre_next = <_ as RecursiveAir<F, E, LogUpGadget>>::opens_preprocessed_next(air);
-        random.push((4, 1));
+        random.push((D, 1));
         main.push((
             <_ as RecursiveAir<F, E, LogUpGadget>>::width(air),
             1 + usize::from(trace_next),
         ));
-        quotient.extend(std::iter::repeat_n((4, 1), chunks));
+        quotient.extend(std::iter::repeat_n((D, 1), chunks));
         if lookup_width != 0 {
             permutation.push((lookup_width, 2));
         }
@@ -72,8 +72,8 @@ pub(crate) fn allocate(
                     local: vec![E::ZERO; pre_width],
                     next: pre_next.then(|| vec![E::ZERO; pre_width]),
                 }),
-                quotient_chunks: vec![vec![E::ZERO; 4]; chunks],
-                random: Some(vec![E::ZERO; 4]),
+                quotient_chunks: vec![vec![E::ZERO; D]; chunks],
+                random: Some(vec![E::ZERO; D]),
             },
             permutation_local: vec![E::ZERO; lookup_width],
             permutation_next: vec![E::ZERO; lookup_width],
@@ -152,7 +152,7 @@ pub(crate) fn allocate(
     let mut openings = Vec::new();
     // PROOF: heights are sorted and distinct; the fixed profile has positive arity.
     for arity in fold_schedule(&heights, final_height, FRI.max_log_arity() as usize) {
-        commits.push(vec![[F::ZERO; 8]].into());
+        commits.push(vec![[F::ZERO; DIGEST]].into());
         openings.push(CommitPhaseMultiStep {
             sibling_values: vec![vec![E::ZERO; (1 << arity) - 1]; queries],
             opening_proof: (
@@ -163,7 +163,7 @@ pub(crate) fn allocate(
             ),
         });
     }
-    let cap = || vec![[F::ZERO; 8]].into();
+    let cap = || vec![[F::ZERO; DIGEST]].into();
     let proof = BatchProof::<Config> {
         commitments: BatchCommitments {
             main: cap(),
@@ -196,7 +196,7 @@ pub(crate) fn allocate(
         .collect::<Vec<_>>();
     let inputs = Inputs::allocate(builder, &proof, common, &counts)?;
     bind(builder, &inputs)?;
-    let ops = verify_batch_circuit::<_, Config, _, _, _, _, _, 16, 8>(
+    let ops = verify_batch_circuit::<_, Config, _, _, _, _, _, WIDTH, RATE>(
         verifier.config(),
         &tables.airs,
         builder,

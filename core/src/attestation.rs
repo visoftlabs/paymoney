@@ -3,9 +3,10 @@
 //! algorithm 128 ([`tlsn_hash`]).
 
 use crate::{
-    engine::{HEADER, hash, pack, tlsn_hash},
+    engine::{HASH_BYTES, HEADER, hash, pack, tlsn_hash},
+    patterns::REQUEST_HEAD,
     statement::Digest,
-    xmss::{Block, PublicKey},
+    xmss::{Block, KEY_BYTES, PublicKey},
 };
 
 /// tlsn algorithm IDs: hash 128, XMSS key and signature 128.
@@ -19,6 +20,16 @@ pub const REQUEST: [&[u8]; 2] = [
     b" HTTP/1.1\r\nhost: app.revolut.com\r\nconnection: close\r\naccept-encoding: identity\r\n",
 ];
 pub const UUID: usize = 36;
+/// Bytes of an attestation uid and of a commitment blinder.
+pub const UID_BYTES: usize = 16;
+pub const BLINDER_BYTES: usize = 16;
+/// Field ids the leaf takes as given: connection info, ephemeral key, certificate.
+pub const OPAQUE: [usize; 3] = [1, 2, 3];
+/// BCS of the `alg` and length that open a `VerifyingKey` and a `TypedHash`.
+pub(crate) const KEY_PREFIX: [u8; 2] = [ALGORITHM, KEY_BYTES as u8];
+pub(crate) const HASH_PREFIX: [u8; 2] = [ALGORITHM, HASH_BYTES as u8];
+/// BCS of `Header::version`, a `u32` zero.
+pub(crate) const VERSION: [u8; 4] = [0; 4];
 pub const REQUEST_LEN: usize = REQUEST[0].len() + UUID + REQUEST[1].len();
 /// Leaves in field-id order: key, connection, ephemeral key, certificate, extension, sent, received.
 pub const LEAVES: usize = 7;
@@ -35,11 +46,16 @@ pub(crate) const TRANSCRIPT_COMMITMENT: [u8; 16] = [
     0xbd, 0x0a, 0xb9, 0xac, 0x6e, 0xa9, 0x3e, 0xbd, 0xa2, 0x50, 0x0e, 0x87, 0x69, 0xe6, 0x3a, 0x9e,
 ];
 
+/// The transaction id in `head`, if it is the transaction-details head the leaf opens.
+pub fn transaction(head: &[u8]) -> Option<&[u8]> {
+    Some(REQUEST_HEAD.captures(head)?.get(1)?.as_bytes())
+}
+
 /// BCS of `VerifyingKey { alg, data }`: algorithm, length, key bytes.
 pub(crate) fn key_bytes(key: &PublicKey) -> Vec<u8> {
-    [&[ALGORITHM, 48][..], &key.to_bytes()].concat()
+    [&KEY_PREFIX[..], &key.to_bytes()].concat()
 }
-pub fn key_leaf(key: &PublicKey) -> [u8; 32] {
+pub fn key_leaf(key: &PublicKey) -> [u8; HASH_BYTES] {
     tlsn_hash(&[&VERIFYING_KEY[..], &key_bytes(key)].concat())
 }
 /// The notary's identity in statements: its key's attestation field hash as words.
@@ -60,23 +76,27 @@ pub(crate) fn extension_bytes() -> Vec<u8> {
     ]
     .concat()
 }
-pub fn extension_leaf() -> [u8; 32] {
+pub fn extension_leaf() -> [u8; HASH_BYTES] {
     tlsn_hash(&[&EXTENSION[..], &extension_bytes()].concat())
 }
 
 /// BCS of `TranscriptCommitment::Hash` over `[0, end)` of `direction` (0 sent, 1 received).
-pub(crate) fn commitment_bytes(direction: u8, end: u64, digest: &[u8; 32]) -> Vec<u8> {
+pub(crate) fn commitment_bytes(direction: u8, end: u64, digest: &[u8; HASH_BYTES]) -> Vec<u8> {
     let range = [0u64.to_le_bytes(), end.to_le_bytes()].concat();
-    [&[0, direction, 1][..], &range, &[ALGORITHM, 32], digest].concat()
+    [&[0, direction, 1][..], &range, &HASH_PREFIX, digest].concat()
 }
-pub fn commitment_leaf(direction: u8, data: &[u8], blinder: &[u8; 16]) -> [u8; 32] {
+pub fn commitment_leaf(
+    direction: u8,
+    data: &[u8],
+    blinder: &[u8; BLINDER_BYTES],
+) -> [u8; HASH_BYTES] {
     let digest = tlsn_hash(&[data, blinder].concat());
     let bytes = commitment_bytes(direction, data.len() as u64, &digest);
     tlsn_hash(&[&TRANSCRIPT_COMMITMENT[..], &bytes].concat())
 }
 
 /// rs_merkle's root: pairs hashed as `H(left ‖ right)`, an odd last node promoted.
-pub fn root(leaves: &[[u8; 32]]) -> [u8; 32] {
+pub fn root(leaves: &[[u8; HASH_BYTES]]) -> [u8; HASH_BYTES] {
     let mut level = leaves.to_vec();
     while level.len() > 1 {
         level = level
@@ -92,8 +112,8 @@ pub fn root(leaves: &[[u8; 32]]) -> [u8; 32] {
 }
 
 /// BCS of `Header { id, version: 0, root: TypedHash { alg, value } }`: the signed message.
-pub fn header(uid: &[u8; 16], root: &[u8; 32]) -> Vec<u8> {
-    [&uid[..], &[0, 0, 0, 0, ALGORITHM, 32], root].concat()
+pub fn header(uid: &[u8; UID_BYTES], root: &[u8; HASH_BYTES]) -> Vec<u8> {
+    [&uid[..], &VERSION, &HASH_PREFIX, root].concat()
 }
 
 /// The XMSS message of a signed header.

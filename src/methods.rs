@@ -1,15 +1,16 @@
-//! The JSON-RPC methods. Artifacts are named files in the data directory; each is replaced
-//! atomically, so a step can be rerun.
+//! The JSON-RPC methods. Artifacts are files in the data directory named by UUID: a record by
+//! its transaction, a leaf by its leg, a root by a fresh id; each is replaced atomically, so a step
+//! can be rerun.
 
 use crate::{
-    Error,
-    http::{self, Server},
-    notary::{self, NOTARIZE_STEPS, Notary, Record},
-    store::{self, Name, Store},
+    Error, http,
+    notary::{self, Record},
+    server::{Client, Server},
+    store::{self, Store},
 };
-use paymoney_core::{Aggregate, Circuits, LegProof, Progress, Verdict};
+use native_messaging::Scope;
+use paymoney_core::{Aggregate, Amount, Circuits, Key, LegProof, Statement, attestation};
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json, to_value};
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -34,136 +35,150 @@ pub enum Method {
     },
     Notarize {
         request: http::Request,
-        notary: Notary,
+        server: Server,
     },
     Prove {
-        record: Name,
+        record: Uuid,
         leg_id: Uuid,
     },
     Aggregate {
         leg_ids: Vec<Uuid>,
     },
     Submit {
-        root: Name,
-        server: reqwest::Url,
+        root: Uuid,
+        server: Server,
     },
     Install,
     #[serde(other)]
     Unknown,
 }
 
-/// A server's RFC 9457 problem.
-#[derive(Deserialize)]
-struct Problem {
-    detail: String,
+/// A method's result.
+#[derive(Clone, Serialize)]
+#[serde(untagged, rename_all_fields = "camelCase")]
+pub enum Reply {
+    HostStatus {
+        version: &'static str,
+        data_dir: PathBuf,
+    },
+    Fetched {
+        response: http::Response,
+    },
+    Notarized {
+        response: http::Response,
+        record: Option<Uuid>,
+    },
+    Proven {
+        key: Key,
+        amount: Amount,
+    },
+    Aggregated {
+        root: Uuid,
+        summary: Statement,
+    },
+    Statement(Statement),
+    Installed {
+        manifest: PathBuf,
+    },
 }
 
 impl Method {
-    pub async fn handle(self, store: &Store) -> Result<Value, Error> {
+    pub async fn handle(self, store: &Store, client: &Client) -> Result<Reply, Error> {
         // The message as received, attached values redacted: rerunnable once they are filled in.
         tracing::info!(event.name = "message.received", rpc.message = %serde_json::to_string(&self)?);
         Ok(match self {
-            Method::HostStatus => {
-                json!({ "version": env!("CARGO_PKG_VERSION"), "dataDir": to_value(store.root())? })
-            }
-            Method::Fetch { request } => {
-                json!({ "response": to_value(http::fetch(&request, &Server::of(&request)).await?)? })
-            }
-            Method::Notarize { request, notary } => {
-                let mut progress = Progress::new(NOTARIZE_STEPS);
-                let server = Server::of(&request);
-                let (record, response) =
-                    notary::notarize(&request, &notary, &server, &mut progress).await?;
-                progress.advance("record.saving");
-                let name = match record {
-                    Some(record) => {
-                        let name = notary::name(&request);
-                        store::replace(&store.path("records", &name)?, &record)?;
-                        Some(name)
+            Method::HostStatus => Reply::HostStatus {
+                version: env!("CARGO_PKG_VERSION"),
+                data_dir: store.root().to_owned(),
+            },
+            Method::Fetch { request } => Reply::Fetched {
+                response: http::fetch(&request).await?,
+            },
+            Method::Notarize { request, server } => {
+                let (record, response) = notary::notarize(&request, &server, client).await?;
+                // PROOF: `transaction` captures a hyphenated UUID, which always parses.
+                let id = |record: &Record| {
+                    Uuid::try_parse_ascii(attestation::transaction(&record.request)?).ok()
+                };
+                let record = match record
+                    .as_ref()
+                    .and_then(|record| Some((id(record)?, record)))
+                {
+                    Some((id, record)) => {
+                        store::replace(&store.path("records", &id)?, record)?;
+                        Some(id)
                     }
                     None => None,
                 };
-                json!({ "response": to_value(response)?, "record": name })
+                Reply::Notarized { response, record }
             }
             Method::Prove { record, leg_id } => {
-                let mut progress = Progress::new(3);
-                let record: Record = store::read(&store.path("records", &record.to_string())?)?;
-                progress.advance("circuits.preparing");
+                let record: Record = store::read(&store.path("records", &record)?)?;
                 let circuits = Circuits::prepare()?;
-                progress.advance("leaf.proving");
                 let leaf = record.prove(&circuits, leg_id)?;
-                progress.advance("leaf.saving");
-                store::replace(&store.path("leaves", &leg_id.to_string())?, &leaf)?;
-                json!({ "key": leaf.leg.key.to_string(), "amount": leaf.leg.amount.minor().to_string() })
+                store::replace(&store.path("leaves", &leg_id)?, &leaf)?;
+                Reply::Proven {
+                    key: leaf.leg.key,
+                    amount: leaf.leg.amount,
+                }
             }
             Method::Aggregate { leg_ids } => {
                 let leaves = leg_ids
                     .iter()
-                    .map(|leg| store::read::<LegProof>(&store.path("leaves", &leg.to_string())?))
+                    .map(|leg| store::read::<LegProof>(&store.path("leaves", leg)?))
                     .collect::<Result<Vec<_>, _>>()?;
-                let mut progress = Progress::new(3);
-                progress.advance("circuits.preparing");
                 let circuits = Circuits::prepare()?;
-                progress.advance("root.proving");
                 let root = circuits.aggregate(leaves)?;
-                progress.advance("root.saving");
-                let statement = root.statement;
-                let name = format!(
-                    "{}-{}-{}",
-                    statement.lo,
-                    statement.hi,
-                    statement.count.get()
-                );
-                store::replace(&store.path("roots", &name)?, &root)?;
-                json!({ "root": name, "summary": to_value(Verdict::from(statement))? })
+                let id = Uuid::new_v4();
+                store::replace(&store.path("roots", &id)?, &root)?;
+                Reply::Aggregated {
+                    root: id,
+                    summary: root.statement,
+                }
             }
             Method::Submit { root, server } => {
-                let root: Aggregate = store::read(&store.path("roots", &root.to_string())?)?;
-                submit(&root, &server).await?
+                let root: Aggregate = store::read(&store.path("roots", &root)?)?;
+                Reply::Statement(submit(&root, &server, client).await?)
             }
-            Method::Install => json!({ "manifest": to_value(install()?)? }),
+            Method::Install => Reply::Installed {
+                manifest: install()?,
+            },
             Method::Unknown => return Err(Error::UnknownMethod),
         })
     }
 }
 
-/// The server's verdict; a problem response is an error carrying the problem.
-async fn submit(root: &Aggregate, server: &reqwest::Url) -> Result<Value, Error> {
-    let url = server.join("api/proofs")?;
-    let response = reqwest::Client::new()
-        .post(url.clone())
-        .json(root)
-        .send()
-        .await?;
-    let status = response.status();
-    let body: Value = response.json().await?;
-    tracing::info!(event.name = "root.submitted", url.full = %url, http.response.status_code = status.as_u16());
-    match status.is_success() {
-        true => Ok(body),
-        false => Err(Error::Problem {
-            detail: serde_json::from_value::<Problem>(body.clone())?.detail,
-            problem: body,
-        }),
-    }
+/// The statement the server verified in `root`; its RFC 9457 problem is an error carrying the
+/// problem.
+async fn submit(root: &Aggregate, server: &Server, client: &Client) -> Result<Statement, Error> {
+    let (response, connection) = client.post(server, "api/proofs").json(root).send().await?;
+    let verdict = async {
+        let response = response.await?;
+        let status = response.status();
+        tracing::info!(event.name = "root.submitted", url.full = %server.url, http.response.status_code = status.as_u16());
+        match status.is_success() {
+            true => response.json().await,
+            false => Err(Error::Problem(response.json().await?)),
+        }
+    };
+    let ((), statement) = tokio::try_join!(connection, verdict)?;
+    Ok(statement)
 }
 
-/// Registers this binary as Chrome's native messaging host for the extension.
+/// Registers this binary as Chrome's native messaging host for the extension, for this user.
 fn install() -> Result<PathBuf, Error> {
-    #[cfg(target_os = "macos")]
-    let dir = store::home()?.join("Library/Application Support/Google/Chrome/NativeMessagingHosts");
-    #[cfg(target_os = "linux")]
-    let dir = store::home()?.join(".config/google-chrome/NativeMessagingHosts");
-    std::fs::create_dir_all(&dir)?;
     let binary = std::env::current_exe()?;
-    let manifest = json!({
-        "name": HOST,
-        "description": "PayMoney native prover",
-        "path": binary,
-        "type": "stdio",
-        "allowed_origins": [format!("chrome-extension://{EXTENSION_ID}/")],
-    });
-    let path = dir.join(format!("{HOST}.json"));
-    store::replace(&path, &manifest)?;
+    let origin = format!("chrome-extension://{EXTENSION_ID}/");
+    native_messaging::install(
+        HOST,
+        "PayMoney native prover",
+        &binary,
+        &[origin],
+        &[],
+        &["chrome"],
+        Scope::User,
+    )?;
+    let path = native_messaging::manifest_path("chrome", Scope::User, HOST)?;
     tracing::info!(event.name = "host.installed", file.path = %path.display(), process.executable.path = %binary.display());
     Ok(path)
 }

@@ -3,9 +3,10 @@
 
 use crate::{
     Error,
-    engine::F,
-    patterns::{CURRENCY, DIGEST, WORD},
+    engine::{DIGEST, F},
+    patterns::CURRENCY,
 };
+use hex::FromHex;
 use p3_field::PrimeField32;
 use serde::{Deserialize, Serialize};
 use serde_with::{DeserializeFromStr, SerializeDisplay};
@@ -17,49 +18,35 @@ const LIMB_MASK: u32 = (1 << LIMB_BITS) - 1;
 /// wrap the 72-bit sum.
 const MAX_AMOUNT: i64 = 1_000_000_000;
 pub(crate) const COUNT_BITS: u32 = 30;
+/// Bits of |amount|: 10⁹ < 2³⁰.
+pub(crate) const AMOUNT_BITS: u32 = 30;
+/// ISO 4217 codes are three letters.
+pub(crate) const CURRENCY_LETTERS: u32 = 3;
 
-fn limbs<const N: usize>(words: [u32; N]) -> Result<[u32; N], Error> {
-    match words.iter().all(|word| *word <= LIMB_MASK) {
-        true => Ok(words),
-        false => Err(Error::Canonical),
+/// Eight canonical KoalaBear words: a verifier set or a notary key; 64 hex digits in JSON.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SerializeDisplay, DeserializeFromStr)]
+pub struct Digest(pub(crate) [u32; DIGEST]);
+impl From<[F; DIGEST]> for Digest {
+    fn from(words: [F; DIGEST]) -> Self {
+        Self(words.map(|word| word.as_canonical_u32()))
     }
 }
-
-/// Eight canonical KoalaBear words: a verifier set or a notary key; hex on display.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "[u32; 8]")]
-pub struct Digest(pub(crate) [u32; 8]);
-impl TryFrom<[u32; 8]> for Digest {
-    type Error = Error;
-    fn try_from(words: [u32; 8]) -> Result<Self, Error> {
+impl FromStr for Digest {
+    type Err = Error;
+    fn from_str(text: &str) -> Result<Self, Error> {
+        let bytes = <[u8; 4 * DIGEST]>::from_hex(text).or(Err(Error::Canonical))?;
+        let words = <[[u8; 4]; DIGEST]>::try_from(bytes.as_chunks::<4>().0)
+            .or(Err(Error::Canonical))?
+            .map(u32::from_be_bytes);
         match words.iter().all(|word| *word < F::ORDER_U32) {
             true => Ok(Self(words)),
             false => Err(Error::Canonical),
         }
     }
 }
-impl From<[F; 8]> for Digest {
-    fn from(words: [F; 8]) -> Self {
-        Self(words.map(|word| word.as_canonical_u32()))
-    }
-}
 impl fmt::Display for Digest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.iter().try_for_each(|word| write!(f, "{word:08x}"))
-    }
-}
-impl FromStr for Digest {
-    type Err = Error;
-    fn from_str(text: &str) -> Result<Self, Error> {
-        if !DIGEST.is_match(text) {
-            return Err(Error::Canonical);
-        }
-        let words = WORD
-            .find_iter(text)
-            .map(|word| u32::from_str_radix(word.as_str(), 16))
-            .collect::<Result<Vec<_>, _>>()
-            .or(Err(Error::Canonical))?;
-        Self::try_from(<[u32; 8]>::try_from(words).or(Err(Error::Canonical))?)
+        f.write_str(&hex::encode(self.0.map(u32::to_be_bytes).as_flattened()))
     }
 }
 
@@ -86,27 +73,28 @@ impl fmt::Display for Currency {
 }
 
 /// Sort key of one leg: low 24 bits of two Poseidon2 words of its `legId`, a 48-bit integer;
-/// in statements, the words `[low, high]`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
-#[serde(try_from = "[u32; 2]", into = "[u32; 2]")]
+/// 12 hex digits in JSON, the words `[low, high]` in statements.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, SerializeDisplay, DeserializeFromStr,
+)]
 pub struct Key(u64);
-impl TryFrom<[u32; 2]> for Key {
-    type Error = Error;
-    fn try_from(words: [u32; 2]) -> Result<Self, Error> {
-        let [low, high] = limbs(words)?;
-        Ok(Self::from_limbs(low, high))
-    }
-}
-impl From<Key> for [u32; 2] {
-    fn from(key: Key) -> Self {
-        // PROOF: a key is below 2^48, so each 24-bit limb fits a word.
-        [key.0 as u32 & LIMB_MASK, (key.0 >> LIMB_BITS) as u32]
-    }
-}
 impl Key {
     /// From two limbs already below 2^24.
     pub(crate) fn from_limbs(low: u32, high: u32) -> Self {
         Self(u64::from(low) | u64::from(high) << LIMB_BITS)
+    }
+    fn limbs(self) -> [u32; 2] {
+        // PROOF: a key is below 2^48, so each 24-bit limb fits a word.
+        [self.0 as u32 & LIMB_MASK, (self.0 >> LIMB_BITS) as u32]
+    }
+}
+impl FromStr for Key {
+    type Err = Error;
+    fn from_str(text: &str) -> Result<Self, Error> {
+        match u64::from_str_radix(text, 16) {
+            Ok(key) if key >> (2 * LIMB_BITS) == 0 => Ok(Self(key)),
+            _ => Err(Error::Canonical),
+        }
     }
 }
 impl fmt::Display for Key {
@@ -115,26 +103,21 @@ impl fmt::Display for Key {
     }
 }
 
-/// Signed minor units as 72-bit two's complement in three 24-bit limbs.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(try_from = "[u32; 3]")]
+/// Signed minor units as 72-bit two's complement in three 24-bit limbs; a decimal string in JSON.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, SerializeDisplay, DeserializeFromStr)]
 pub struct Amount([u32; 3]);
-impl TryFrom<[u32; 3]> for Amount {
-    type Error = Error;
-    fn try_from(words: [u32; 3]) -> Result<Self, Error> {
-        Ok(Self(limbs(words)?))
-    }
-}
 impl Amount {
     pub fn new(minor: i64) -> Result<Self, Error> {
-        if !(-MAX_AMOUNT < minor && minor < MAX_AMOUNT) {
-            return Err(Error::Amount(minor));
+        match -MAX_AMOUNT < minor && minor < MAX_AMOUNT {
+            true => Ok(Self::of(i128::from(minor))),
+            false => Err(Error::Amount(minor)),
         }
+    }
+    /// From any value in `[-2^71, 2^71)`.
+    fn of(minor: i128) -> Self {
         // PROOF: rem_euclid maps into [0, 2^72); each shifted limb is masked to 24 bits.
-        let bits = i128::from(minor).rem_euclid(1 << 72) as u128;
-        Ok(Self(
-            [0, 1, 2].map(|i| (bits >> (LIMB_BITS * i)) as u32 & LIMB_MASK),
-        ))
+        let bits = minor.rem_euclid(1 << 72) as u128;
+        Self([0, 1, 2].map(|i| (bits >> (LIMB_BITS * i)) as u32 & LIMB_MASK))
     }
     pub fn minor(self) -> i128 {
         let bits = self
@@ -159,6 +142,20 @@ impl Amount {
             *out = carry;
         }
         (Self(limbs), carries)
+    }
+}
+impl FromStr for Amount {
+    type Err = Error;
+    fn from_str(text: &str) -> Result<Self, Error> {
+        match text.parse::<i128>() {
+            Ok(minor) if (-(1 << 71)..1 << 71).contains(&minor) => Ok(Self::of(minor)),
+            _ => Err(Error::Canonical),
+        }
+    }
+}
+impl fmt::Display for Amount {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.minor())
     }
 }
 
@@ -199,14 +196,15 @@ impl Leg {
         let notary = self.notary.0.into_iter();
         notary
             .chain([self.currency.0])
-            .chain(<[u32; 2]>::from(self.key))
+            .chain(self.key.limbs())
             .chain(self.amount.0)
             .collect()
     }
 }
 
 /// What an aggregate proves: `count` distinct legs attested by `notary` in `currency`, keys in
-/// `lo..=hi`, summing to `sum`; `set` names the verifier set that checked them.
+/// `lo..=hi`, summing to `sum`; `set` names the verifier set that checked them. Its JSON is also
+/// the verdict people read.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Statement {
     pub set: Digest,
@@ -226,12 +224,14 @@ impl Statement {
     pub(crate) const HI: Range<usize> = 19..21;
     pub(crate) const SUM: Range<usize> = 21..24;
     pub(crate) const COUNT: usize = 24;
+    /// Merge witness hints, `[gap0, gap1, borrow, carry0, carry1, carry2]`.
+    pub(crate) const HINTS: usize = 6;
     pub(crate) fn words(&self) -> Vec<u32> {
         let set = self.set.0.into_iter();
         set.chain(self.notary.0)
             .chain([self.currency.0])
-            .chain(<[u32; 2]>::from(self.lo))
-            .chain(<[u32; 2]>::from(self.hi))
+            .chain(self.lo.limbs())
+            .chain(self.hi.limbs())
             .chain(self.sum.0)
             .chain([self.count.0])
             .collect()
@@ -249,7 +249,7 @@ impl Statement {
     }
     /// Native mirror of the merge relation: the merged statement and its witness hints
     /// `[gap0, gap1, borrow, carry0, carry1, carry2]`.
-    pub(crate) fn merge(&self, right: &Self) -> Result<(Self, [u32; 6]), Error> {
+    pub(crate) fn merge(&self, right: &Self) -> Result<(Self, [u32; Self::HINTS]), Error> {
         if (self.set, self.notary, self.currency) != (right.set, right.notary, right.currency) {
             return Err(Error::Mismatch);
         }
@@ -262,7 +262,7 @@ impl Statement {
         let (sum, [c0, c1, c2]) = self.sum.add(right.sum);
         // PROOF: gap < 2^48, so both shifted limbs fit 24 bits.
         let [gap0, gap1] = [gap as u32 & LIMB_MASK, (gap >> LIMB_BITS) as u32];
-        let [hi_low, _] = <[u32; 2]>::from(self.hi);
+        let [hi_low, _] = self.hi.limbs();
         let borrow = (hi_low + 1 + gap0) >> LIMB_BITS;
         let merged = Self {
             hi: right.hi,
@@ -271,30 +271,5 @@ impl Statement {
             ..*self
         };
         Ok((merged, [gap0, gap1, borrow, c0, c1, c2]))
-    }
-}
-
-/// A verified statement, for people: hex IDs, a signed diff in minor units.
-#[derive(Debug, Deserialize, Serialize)]
-pub struct Verdict {
-    pub set: String,
-    pub notary: String,
-    pub currency: String,
-    pub diff: String,
-    pub count: u32,
-    pub lo: String,
-    pub hi: String,
-}
-impl From<Statement> for Verdict {
-    fn from(statement: Statement) -> Self {
-        Self {
-            set: statement.set.to_string(),
-            notary: statement.notary.to_string(),
-            currency: statement.currency.to_string(),
-            diff: statement.sum.minor().to_string(),
-            count: statement.count.get(),
-            lo: statement.lo.to_string(),
-            hi: statement.hi.to_string(),
-        }
     }
 }

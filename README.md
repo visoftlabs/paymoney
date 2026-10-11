@@ -36,7 +36,7 @@ circuit fixes how.
 | Notary          | server name and chain, TLS time/version, ciphertext lengths, blinded commitments | request, cookies, response, legs |
 | Server          | the root statement                                                               | legs, amounts, ids, responses    |
 | Page            | listed transactions, header names, logs, verdicts                                | header values, records, proofs   |
-| data dir (0700) | records (full responses), leaves, roots                                          | session headers                  |
+| data dir (0700) | records (full responses), leaves, roots, each 0600                               | session headers                  |
 
 ## Notarization (`src/notary.rs`, `src/http.rs`)
 
@@ -47,11 +47,10 @@ circuit fixes how.
   committed, logged or stored.
 - MPC-TLS with `max_sent = 8 KiB`, `max_recv = 8192`. The prover commits `sent[0..head)` (request
   line, `host`, the headers before the first attached one) and `recv[0..n)` with hash 128,
-  revealing only the server identity. A 200 yields a `Record`, saved as `records/{H(head)}.json`.
-- The session runs on one bidirectional stream of a WebTransport session (HTTP/3) to the notary's
-  URL; a self-signed notary certificate is pinned by its SHA-256 (WebTransport's
-  `serverCertificateHashes`), any other is verified with the platform's roots. The attestation
-  request and the attestation cross that stream as JSON.
+  revealing only the server identity. A 200 to the transaction-details head yields a `Record`,
+  saved as `records/<transactionId>.json`.
+- The session runs over one full-duplex HTTP/3 request, `POST /api/notary` to the server (request
+  body up, response body down); the attestation request and the attestation cross it as JSON.
 - The notary, run by the PayMoney server, adds `Extension { "server_name": <verified name> }` to
   what it verified and signs with XMSS.
 
@@ -131,7 +130,9 @@ parsed canonically (digest words `< p`, limbs `< 2²⁴`, `count ∈ 1..2³⁰`)
 - Wrap and merge use fixed strict table heights (`LAYOUT`), calibrated as the smallest both accept.
 
 `check`: canonical parse, `set` equals this code's, the proof checks; which notaries to trust is
-the verifier's policy.
+the verifier's policy. A statement's JSON is readable as it stands: `set` and `notary` as 64 hex
+digits, `currency` as its code, `lo`/`hi` as 12 hex digits, `sum` as signed decimal minor units,
+`count` as a number; each parses back to its canonical words.
 
 ## Parameters
 
@@ -145,60 +146,48 @@ the verifier's policy.
 
 ## Interface
 
-`paymoney` serves JSON-RPC 2.0 on stdio: one message per line (as MCP's stdio transport), or per
-native-endian length-prefixed frame (≤ 64 KiB) when Chrome starts it with `chrome-extension://…/`.
-Before each response it sends its log as notifications
-`{ "method": "log", "params": { "severity_text", "event.name", … } }` with OpenTelemetry attribute
-names (`url.full`, `http.response.status_code`, …); the first per request, `message.received`,
-carries the request with attached values redacted. Long methods log their steps as they start,
-with `paymoney.step` and `paymoney.steps` (step k of n): `notarize` six, `prove` three, `aggregate`
-three, its proving step logging `leaf.wrapping` and `proofs.merging` as 2n − 1 more. Release
-builds only: debug builds run Plonky3's serial self-checks.
+`paymoney` is a Chrome native-messaging host: JSON-RPC 2.0, one message per native-endian
+length-prefixed frame (≤ 64 KiB in) on stdio. It logs tracing-subscriber's JSON to stderr, which
+Chrome keeps in its own log, with OpenTelemetry attribute names (`event.name`, `url.full`, …); the
+first event per request, `message.received`, carries the request with attached values redacted.
+Protocol steps are spans: `notarize` runs `connect`, `preprocess`, `exchange`, `prove`,
+`request_attestation`; `prove` and `aggregate` run `prepare`, then `prove_leg`, or `wrap` per leg
+and `merge` per pair. `RUST_LOG` overrides the INFO default. Release builds only: debug builds run
+Plonky3's serial self-checks.
 
-| Method        | Params              | Result                                                                                         |
-| ------------- | ------------------- | ---------------------------------------------------------------------------------------------- |
-| `host.status` | —                   | `{ version, dataDir }`                                                                         |
-| `fetch`       | `request` (HAR)     | `{ response }`: HAR, headers withheld (`set-cookie` can carry the session)                     |
-| `notarize`    | `request`, `notary` | `{ response, record }`; `record` is `null` unless 200; `notary` is `{ url, certificateHash? }` |
-| `prove`       | `record`, `legId`   | `{ key, amount }`                                                                              |
-| `aggregate`   | `legIds`            | `{ root, summary }`                                                                            |
-| `submit`      | `root`, `server`    | the server's verdict; its RFC 9457 problem as error `data`                                     |
-| `install`     | —                   | `{ manifest }`: Chrome's native messaging host `finance.paymoney.host`                         |
+| Method        | Params              | Result                                                                     |
+| ------------- | ------------------- | -------------------------------------------------------------------------- |
+| `host.status` | —                   | `{ version, dataDir }`                                                     |
+| `fetch`       | `request` (HAR)     | `{ response }`: HAR, headers withheld (`set-cookie` can carry the session) |
+| `notarize`    | `request`, `server` | `{ response, record }`; `record` is `null` unless 200                      |
+| `prove`       | `record`, `legId`   | `{ key, amount }`                                                          |
+| `aggregate`   | `legIds`            | `{ root, summary }`                                                        |
+| `submit`      | `root`, `server`    | the statement the server verified; its RFC 9457 problem as error `data`    |
+| `install`     | —                   | `{ manifest }`: Chrome's native messaging host `finance.paymoney.host`     |
+
+`server` is the PayMoney server: `{ url, certificate? }`, its origin and, for a self-signed
+certificate, that certificate (PEM), then the only root trusted (otherwise Mozilla's roots verify
+it). Both methods speak HTTP/3 to it: `notarize` one full-duplex `POST /api/notary`, `submit` a
+`POST /api/proofs` of the root, answered by its statement or an RFC 9457 problem.
 
 Errors: -32700 parse, -32600 invalid request (batches included), -32601 unknown method, -32602
-invalid params (a refused header, a name that is not hex and dashes), -32000 any failure inside a
-method. Artifacts are named, never paths: `records/<H(head)>`, `leaves/<legId>`,
-`roots/<lo>-<hi>-<count>`, each replaced atomically, in the data dir: `~/Library/Application
-Support/finance.paymoney` on macOS, `$XDG_DATA_HOME/paymoney` (default `~/.local/share/paymoney`)
+invalid params (a refused header, an id that is not a UUID), -32000 any failure inside a method.
+Artifacts are named by UUID, never by path: `records/<transactionId>`, `leaves/<legId>`,
+`roots/<fresh id>`, each replaced atomically, in the data dir: `~/Library/Application
+Support/finance.paymoney` on macOS, `$XDG_DATA_HOME/finance.paymoney` (default `~/.local/share/finance.paymoney`)
 on Linux.
 
 ```sh
 cargo install --git https://github.com/visoftlabs/paymoney
-paymoney < fetch.jsonl
+printf '\053\000\000\000{"jsonrpc":"2.0","id":1,"method":"install"}' | paymoney | tail -c +5
 ```
 
-A transaction-details `fetch`: the leaf's head, then every header of a DevTools HAR entry as
-`_attached` (Revolut answered 400 to only `cookie`, `x-device-id`, `x-client-version`,
-`x-browser-application`), shown wrapped; on the wire it is one line:
+From a terminal, a message is framed by hand: its JSON's byte length as a native-endian `u32`
+(`\053\000\000\000` is 43), then the JSON; `tail -c +5` drops the reply's prefix.
 
-```json
-{
-  "jsonrpc": "2.0",
-  "id": 1,
-  "method": "fetch",
-  "params": {
-    "request": {
-      "method": "GET",
-      "url": "https://app.revolut.com/api/retail/transaction/<id>",
-      "headers": [
-        { "name": "connection", "value": "close" },
-        { "name": "accept-encoding", "value": "identity" },
-        { "name": "cookie", "value": "…", "_attached": true }
-      ]
-    }
-  }
-}
-```
+A `request` lists the leaf's head first, then each session header as `{ name, _attached: true }`;
+Revolut answered 400 to only `cookie`, `x-device-id`, `x-client-version` and
+`x-browser-application`.
 
 ## Performance
 
@@ -221,8 +210,7 @@ so locked commits stay fetchable.
 
 ## Open
 
-- Run the attested pipeline against `app.revolut.com`; measure the real head, notarization time,
-  and peak RSS.
+- Measure a real `app.revolut.com` head, notarization time and peak RSS.
 - The FRI profile's security level needs its own review.
 
 ## Checks

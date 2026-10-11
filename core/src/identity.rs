@@ -3,7 +3,7 @@
 
 use crate::{
     Error,
-    engine::{CIRCUIT_KEY, Config, DESCRIPTOR, E, F, FRI, hash, pack},
+    engine::{CIRCUIT_KEY, Config, D, DESCRIPTOR, DIGEST, E, F, FRI, hash, pack},
 };
 use p3_air::{Air, BaseAir, symbolic::AirLayout};
 use p3_circuit_prover::CircuitVerifier;
@@ -16,7 +16,7 @@ pub(crate) fn descriptor(verifier: &CircuitVerifier<Config>) -> Result<Vec<u8>, 
     let common = verifier.common_data();
     let preprocessed = common.preprocessed.as_ref().ok_or(Error::Shape)?;
     let constraints = verifier
-        .table_airs::<4>()?
+        .table_airs::<D>()?
         .iter()
         .map(|air| {
             let layout = AirLayout::from_air::<F>(air);
@@ -74,11 +74,11 @@ pub(crate) fn descriptor(verifier: &CircuitVerifier<Config>) -> Result<Vec<u8>, 
     ))?)
 }
 
-pub(crate) fn descriptor_digest(verifier: &CircuitVerifier<Config>) -> Result<[F; 8], Error> {
+pub(crate) fn descriptor_digest(verifier: &CircuitVerifier<Config>) -> Result<[F; DIGEST], Error> {
     Ok(hash(DESCRIPTOR, &pack(&descriptor(verifier)?)))
 }
 
-pub(crate) fn key(verifier: &CircuitVerifier<Config>) -> Result<[F; 8], Error> {
+pub(crate) fn key(verifier: &CircuitVerifier<Config>) -> Result<[F; DIGEST], Error> {
     let mut words = descriptor_digest(verifier)?.to_vec();
     let commitment = &verifier
         .common_data()

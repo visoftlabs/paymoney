@@ -5,8 +5,8 @@ pub mod crypto;
 pub mod http;
 pub mod methods;
 pub mod notary;
-pub mod patterns;
 pub mod rpc;
+pub mod server;
 pub mod store;
 
 #[derive(Debug, thiserror::Error)]
@@ -15,8 +15,6 @@ pub enum Error {
     Io(#[from] std::io::Error),
     #[error("JSON: {0}")]
     Json(#[from] serde_json::Error),
-    #[error("HTTP: {0}")]
-    Http(#[from] reqwest::Error),
     #[error("URL: {0}")]
     Url(#[from] url::ParseError),
     #[error("proof system: {0}")]
@@ -55,31 +53,36 @@ pub enum Error {
     DnsName(#[from] rustls::pki_types::InvalidDnsNameError),
     #[error("response body is not UTF-8")]
     Utf8(#[from] std::string::FromUtf8Error),
-    #[error("notarization rejected")]
-    Rejected,
-    #[error("notary connection: {0}")]
-    Connecting(#[from] wtransport::error::ConnectingError),
-    #[error("notary session: {0}")]
-    Connection(#[from] wtransport::error::ConnectionError),
-    #[error("notary stream: {0}")]
-    StreamOpening(#[from] wtransport::error::StreamOpeningError),
-    #[error("certificate hash is not 64 lowercase hex digits: {0:?}")]
-    CertificateHash(String),
-    #[error("invalid name {0:?}")]
-    Name(String),
-    #[error("logging: {0}")]
-    Logging(#[from] tracing_subscriber::util::TryInitError),
+    #[error("the sent transcript does not start with the committed head")]
+    NotCommitted,
+    #[error("the TLS transcript has no server certificate chain or signature")]
+    NoHandshake,
+    #[error("no blinder for the {0:?} commitment")]
+    NoBlinder(tlsn::transcript::Direction),
+    #[error("attestation field {0} is missing or not a 32-byte hash")]
+    FieldHash(usize),
+    #[error("server connection: {0}")]
+    Connect(#[from] quinn::ConnectError),
+    #[error("server connection: {0}")]
+    Quic(#[from] quinn::ConnectionError),
+    #[error("QUIC TLS: {0}")]
+    QuicTls(#[from] quinn::crypto::rustls::NoInitialCipherSuite),
+    #[error("HTTP/3 connection: {0}")]
+    H3Connection(#[from] h3::error::ConnectionError),
+    #[error("HTTP/3 stream: {0}")]
+    H3Stream(#[from] h3::error::StreamError),
+    #[error("server answered HTTP {0}")]
+    Status(hyper::StatusCode),
+    #[error("PEM: {0}")]
+    Pem(#[from] rustls::pki_types::pem::Error),
     #[error("Method not found")]
     UnknownMethod,
-    #[error("{detail}")]
-    Problem {
-        detail: String,
-        problem: serde_json::Value,
-    },
-    #[error("unexpected argument {0:?}: paymoney reads JSON-RPC 2.0 messages, one per stdin line")]
-    Usage(String),
-    #[error("frame of {0} bytes exceeds the native messaging limit")]
-    Frame(usize),
+    #[error("{}", .0.detail)]
+    Problem(server::Problem),
+    #[error("atomic write: {0}")]
+    Persist(#[from] tempfile::PersistError),
+    #[error("native messaging: {0}")]
+    NativeMessaging(#[from] native_messaging::host::NmError),
     #[error("no home directory")]
     Home,
     #[error("attestation request: {0}")]

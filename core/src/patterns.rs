@@ -3,19 +3,15 @@
 use crate::{
     attestation::REQUEST,
     leaf::{MAX_DIGITS, STATUS},
+    statement::CURRENCY_LETTERS,
 };
 use regex::{Regex, bytes};
 use std::sync::LazyLock;
 
-/// PROOF: a statement digest is eight 8-digit lowercase hex words, as `Digest` displays it.
-pub(crate) static DIGEST: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new("^(?:[0-9a-f]{8}){8}$").expect("digest pattern"));
-/// PROOF: one word of a matched `DIGEST`.
-pub(crate) static WORD: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new("[0-9a-f]{8}").expect("word pattern"));
 /// PROOF: ISO 4217 codes are three uppercase ASCII letters.
-pub(crate) static CURRENCY: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new("^[A-Z]{3}$").expect("currency pattern"));
+pub(crate) static CURRENCY: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(&format!("^[A-Z]{{{CURRENCY_LETTERS}}}$")).expect("currency pattern")
+});
 /// PROOF: an HTTP/1.1 head ends at the first empty line (RFC 9112 §2.1).
 pub(crate) static HEAD_END: LazyLock<bytes::Regex> =
     LazyLock::new(|| bytes::Regex::new(r"\r\n\r\n").expect("head end pattern"));

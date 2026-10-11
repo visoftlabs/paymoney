@@ -4,7 +4,7 @@
 use crate::{
     Error,
     attestation::message,
-    engine::{F, XMSS_CHAIN, XMSS_LEAF, XMSS_MESSAGE, XMSS_PRF, XMSS_TREE, hash},
+    engine::{DIGEST, F, XMSS_CHAIN, XMSS_LEAF, XMSS_MESSAGE, XMSS_PRF, XMSS_TREE, hash},
 };
 use p3_field::{PrimeCharacteristicRing, PrimeField32};
 use rayon::prelude::*;
@@ -15,13 +15,22 @@ pub(crate) const BASE: usize = 16;
 pub(crate) const TARGET_SUM: usize = 293;
 /// Policy: 1024 signatures per key; key generation and signing rebuild the tree in ~1 s.
 pub(crate) const LOG_LIFETIME: usize = 10;
-/// Digest words carrying digits: six base-16 digits from the low 24 bits of each.
-pub(crate) const DIGEST_WORDS: usize = CHAINS.div_ceil(6);
+/// Bits of one base-16 digit.
+pub(crate) const DIGIT_BITS: usize = BASE.ilog2() as usize;
+/// Digits read from the low 24 bits of each digest word.
+pub(crate) const DIGITS_PER_WORD: usize = 6;
+/// Digest words carrying digits.
+pub(crate) const DIGEST_WORDS: usize = CHAINS.div_ceil(DIGITS_PER_WORD);
+/// Tweak parameter words.
+pub(crate) const PARAMETER: usize = 4;
+/// Public key words, `parameter ‖ root`, and their little-endian bytes.
+pub(crate) const KEY_WORDS: usize = PARAMETER + DIGEST;
+pub(crate) const KEY_BYTES: usize = 4 * KEY_WORDS;
 /// Signature words: epoch, randomness, chain nodes, authentication path.
-pub(crate) const SIGNATURE_WORDS: usize = 1 + 8 * (1 + CHAINS + LOG_LIFETIME);
+pub(crate) const SIGNATURE_WORDS: usize = 1 + DIGEST * (1 + CHAINS + LOG_LIFETIME);
 
-pub(crate) type Block = [F; 8];
-pub(crate) type Parameter = [F; 4];
+pub(crate) type Block = [F; DIGEST];
+pub(crate) type Parameter = [F; PARAMETER];
 
 /// Public key: the tweak parameter and the Merkle root over all one-time keys.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -109,12 +118,19 @@ fn digits(digest: &Block) -> Option<[u32; CHAINS]> {
         .iter()
         .take(DIGEST_WORDS)
         .map(|word| word.as_canonical_u32());
-    // The circuit decomposes each word into 31 bits; p - 1 is the only value with all of 24..31 set.
-    if words.clone().any(|word| word >> 24 == 0x7f) {
+    // The circuit decomposes each word into 31 bits; p − 1 is the only value with all of its
+    // bits above the digits set.
+    let span = DIGITS_PER_WORD * DIGIT_BITS;
+    if words
+        .clone()
+        .any(|word| word >> span == (F::ORDER_U32 - 1) >> span)
+    {
         return None;
     }
     let mut digits = [0; CHAINS];
-    let all = words.flat_map(|word| (0..6).map(move |index| (word >> (4 * index)) & 0xf));
+    let all = words.flat_map(|word| {
+        (0..DIGITS_PER_WORD).map(move |index| (word >> (DIGIT_BITS * index)) & (BASE as u32 - 1))
+    });
     for (digit, value) in digits.iter_mut().zip(all) {
         *digit = value;
     }
@@ -122,13 +138,13 @@ fn digits(digest: &Block) -> Option<[u32; CHAINS]> {
 }
 
 fn random_block() -> Block {
-    rand::random::<[u32; 8]>().map(F::from_u32)
+    rand::random::<[u32; DIGEST]>().map(F::from_u32)
 }
 
 impl SecretKey {
     pub fn generate() -> Self {
         let seed = random_block();
-        let parameter = rand::random::<[u32; 4]>().map(F::from_u32);
+        let parameter = rand::random::<[u32; PARAMETER]>().map(F::from_u32);
         let root = Self::tree(&seed, &parameter, 0).root;
         Self {
             seed,
@@ -230,7 +246,7 @@ impl SecretKey {
     }
     pub fn from_words(words: &[u32]) -> Result<Self, Error> {
         let words = canonical(words)?;
-        let (seed, parameter) = words.split_first_chunk::<8>().ok_or(Error::Shape)?;
+        let (seed, parameter) = words.split_first_chunk::<DIGEST>().ok_or(Error::Shape)?;
         let parameter: Parameter = parameter.try_into().or(Err(Error::Shape))?;
         let root = Self::tree(seed, &parameter, 0).root;
         Ok(Self {
@@ -256,7 +272,7 @@ fn canonical(words: &[u32]) -> Result<Vec<F>, Error> {
 }
 
 impl PublicKey {
-    /// `parameter ‖ root` as 48 little-endian bytes.
+    /// `parameter ‖ root` as `KEY_BYTES` little-endian bytes.
     pub fn to_bytes(&self) -> Vec<u8> {
         let parameter = self.parameter.iter();
         parameter
@@ -265,7 +281,7 @@ impl PublicKey {
             .collect()
     }
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
-        let bytes = <&[u8; 48]>::try_from(bytes).or(Err(Error::Shape))?;
+        let bytes = <&[u8; KEY_BYTES]>::try_from(bytes).or(Err(Error::Shape))?;
         let words = bytes
             .as_chunks::<4>()
             .0
@@ -273,7 +289,7 @@ impl PublicKey {
             .map(|chunk| u32::from_le_bytes(*chunk))
             .collect::<Vec<_>>();
         let words = canonical(&words)?;
-        let (parameter, root) = words.split_first_chunk::<4>().ok_or(Error::Shape)?;
+        let (parameter, root) = words.split_first_chunk::<PARAMETER>().ok_or(Error::Shape)?;
         Ok(Self {
             parameter: *parameter,
             root: root.try_into().or(Err(Error::Shape))?,
@@ -342,7 +358,7 @@ impl Signature {
             .map(|chunk| u32::from_le_bytes(*chunk))
             .collect::<Vec<_>>();
         let (epoch, rest) = words.split_first().ok_or(Error::Shape)?;
-        let blocks = canonical(rest)?.as_chunks::<8>().0.to_vec();
+        let blocks = canonical(rest)?.as_chunks::<DIGEST>().0.to_vec();
         let (randomness, rest) = blocks.split_first().ok_or(Error::Shape)?;
         let (chains, path) = rest.split_at_checked(CHAINS).ok_or(Error::Shape)?;
         Ok(Self {

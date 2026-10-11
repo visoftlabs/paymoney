@@ -8,16 +8,14 @@ mod identity;
 mod json;
 mod leaf;
 mod patterns;
-mod progress;
 mod shape;
 mod statement;
 mod xmss;
 
-pub use circuits::{Aggregate, Circuits, LegProof, Member};
-pub use engine::{TLSN_DOMAIN, tlsn_hash};
+pub use circuits::{Aggregate, Circuits, LegProof};
+pub use engine::{HASH_BYTES, tlsn_hash};
 pub use leaf::{Attested, MAX_RESPONSE};
-pub use progress::Progress;
-pub use statement::{Amount, Count, Currency, Digest, Key, Leg, Statement, Verdict};
+pub use statement::{Amount, Count, Currency, Digest, Key, Leg, Statement};
 pub use xmss::{PublicKey, SecretKey, Signature};
 
 #[derive(Debug, thiserror::Error)]

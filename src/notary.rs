@@ -1,20 +1,21 @@
-//! The prover's side of MPC-TLS with tlsn attestations: it commits to the request head and the
-//! whole response (hash 128) and reveals nothing; the notary, reached over WebTransport, adds the
-//! verified server name and signs with XMSS.
+//! The prover's side of MPC-TLS: commitments (hash 128) to the request head and the whole
+//! response, nothing revealed; the notary adds the verified server name and signs with XMSS.
 
 use crate::{
     Error,
     crypto::{self, HASH, SIGNATURE},
-    http::{self, Request, Response, Server},
-    patterns::{CERTIFICATE_HASH, HEX_BYTE},
+    http::{self, Request, Response},
+    server::{Client, Server},
 };
-use futures::{AsyncReadExt, AsyncWriteExt};
-use paymoney_core::{Attested, Circuits, LegProof, Progress, PublicKey, Signature, tlsn_hash};
+use futures::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, StreamExt};
+use hyper::StatusCode;
+use paymoney_core::{
+    Attested, Circuits, HASH_BYTES, LegProof, PublicKey, Signature,
+    attestation::{BLINDER_BYTES, OPAQUE},
+};
 use serde::{Deserialize, Serialize};
-use serde_with::{DeserializeFromStr, SerializeDisplay};
-use std::{fmt, future::IntoFuture, str::FromStr};
 use tlsn::{
-    Session as MpcSession,
+    Mpc, Session as MpcSession, SessionHandle,
     attestation::{
         Attestation,
         request::{Request as AttestationRequest, RequestConfig},
@@ -24,58 +25,30 @@ use tlsn::{
         tls_commit::mpc::MpcTlsConfig,
     },
     connection::{HandshakeData, ServerName},
-    transcript::{Direction, TranscriptCommitConfig, TranscriptCommitmentKind, TranscriptSecret},
+    prover::{
+        Prover, ProverOutput,
+        state::{CommitAccepted, Committed},
+    },
+    transcript::{
+        Direction, TlsTranscript, Transcript, TranscriptCommitConfig, TranscriptCommitmentKind,
+        TranscriptSecret,
+    },
+    webpki::RootCertStore,
 };
 use tokio::net::TcpStream;
-use tokio_util::compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt};
-use url::Url;
+use tokio_util::{
+    compat::{FuturesAsyncReadCompatExt, TokioAsyncReadCompatExt},
+    io::{ReaderStream, StreamReader},
+};
+use tracing::{Instrument, info_span};
 use uuid::Uuid;
-use wtransport::{ClientConfig, Endpoint, VarInt, tls::Sha256Digest};
 
 /// Policy: the request carries the browser's cookies (a few KiB).
-pub const MAX_SENT: usize = 1 << 13;
+pub const MAX_SENT: usize = 8 * 1024;
 /// The leaf circuit's response capacity.
 pub const MAX_RECV: usize = paymoney_core::MAX_RESPONSE;
-
-/// Where the notary is: its WebTransport URL and, for a self-signed certificate, that certificate's
-/// SHA-256, pinned as WebTransport's `serverCertificateHashes` does; without one, the platform's
-/// roots verify it.
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Notary {
-    pub url: Url,
-    pub certificate_hash: Option<CertificateHash>,
-}
-
-/// A certificate's SHA-256, as lowercase hex on the wire.
-#[derive(Clone, Copy, SerializeDisplay, DeserializeFromStr)]
-pub struct CertificateHash([u8; 32]);
-impl FromStr for CertificateHash {
-    type Err = Error;
-    fn from_str(hex: &str) -> Result<Self, Error> {
-        if !CERTIFICATE_HASH.is_match(hex) {
-            return Err(Error::CertificateHash(hex.to_owned()));
-        }
-        let bytes = HEX_BYTE
-            .find_iter(hex)
-            .map(|byte| u8::from_str_radix(byte.as_str(), 16))
-            .collect::<Result<Vec<_>, _>>()
-            .or(Err(Error::CertificateHash(hex.to_owned())))?;
-        Ok(Self(
-            bytes
-                .try_into()
-                .or(Err(Error::CertificateHash(hex.to_owned())))?,
-        ))
-    }
-}
-impl fmt::Display for CertificateHash {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        self.0.iter().try_for_each(|byte| write!(f, "{byte:02x}"))
-    }
-}
-
-/// The steps `notarize` logs; the caller logs the last, saving the record.
-pub const NOTARIZE_STEPS: usize = 6;
+/// Policy: MPC bytes written ahead of the request stream before the session waits.
+const BUFFER: usize = 64 * 1024;
 
 /// A notarized transaction: the attestation, the committed bytes and their blinders. Local
 /// evidence; the leaf proof keeps all of it private.
@@ -84,9 +57,9 @@ pub struct Record {
     pub attestation: Attestation,
     /// Bytes, not text: a chunk boundary may split a UTF-8 sequence.
     pub request: Vec<u8>,
-    pub request_blinder: [u8; 16],
+    pub request_blinder: [u8; BLINDER_BYTES],
     pub response: Vec<u8>,
-    pub response_blinder: [u8; 16],
+    pub response_blinder: [u8; BLINDER_BYTES],
 }
 impl Record {
     /// Proves the leg `leg` of this transaction from its attestation.
@@ -95,15 +68,16 @@ impl Record {
         let fields = attestation
             .body
             .hash_fields(crypto::provider().hash.get(&HASH)?);
-        let opaque = |index: usize| -> Result<[u8; 32], Error> {
-            let (_, hash) = fields.get(index).ok_or(Error::Rejected)?;
-            hash.as_bytes().try_into().or(Err(Error::Rejected))
+        let opaque = |id: usize| -> Result<[u8; HASH_BYTES], Error> {
+            let (_, hash) = fields.get(id).ok_or(Error::FieldHash(id))?;
+            hash.as_bytes().try_into().or(Err(Error::FieldHash(id)))
         };
+        let [connection, ephemeral_key, certificate] = OPAQUE.map(opaque);
         let attested = Attested {
             key: PublicKey::from_bytes(&attestation.body.verifying_key().data)?,
             signature: Signature::from_bytes(&attestation.signature.data)?,
             uid: attestation.header.id.0,
-            opaque: [opaque(1)?, opaque(2)?, opaque(3)?],
+            opaque: [connection?, ephemeral_key?, certificate?],
             request: &self.request,
             request_blinder: self.request_blinder,
             response: &self.response,
@@ -114,114 +88,49 @@ impl Record {
     }
 }
 
-/// Sends `request` through MPC-TLS and has its committed head and the response attested; a record
-/// only for a 200, the one status the leaf opens. Logs the first five of `NOTARIZE_STEPS`.
+/// Sends `request` through MPC-TLS and has its committed head and the response attested by
+/// `server`'s notary; a record only for a 200, the one status the leaf opens. The notary
+/// connection, the MPC session and the protocol run together and end together.
 pub async fn notarize(
     request: &Request,
-    notary: &Notary,
     server: &Server,
-    progress: &mut Progress,
+    client: &Client,
 ) -> Result<(Option<Record>, Response), Error> {
-    progress.advance("notary.connecting");
-    let config = ClientConfig::builder().with_bind_default();
-    let config = match notary.certificate_hash {
-        Some(CertificateHash(hash)) => config
-            .with_server_certificate_hashes([Sha256Digest::new(hash)])
-            .build(),
-        None => config.with_native_certs().build(),
-    };
-    // The WebTransport session lives as long as this call; its one bidirectional stream carries
-    // the MPC-TLS session.
-    let session = Endpoint::client(config)?
-        .connect(notary.url.as_str())
+    let (unsent, writes) = tokio::io::simplex(BUFFER);
+    let (notary, connection) = client
+        .post(server, "api/notary")
+        .body(ReaderStream::new(unsent).boxed())
+        .send()
+        .instrument(info_span!("connect"))
         .await?;
-    let (send, recv) = session.open_bi().await?.await?;
-    let (driver, mut handle) = MpcSession::new(tokio::io::join(recv, send).compat()).split();
-    let driver = tokio::spawn(driver);
-    let mpc = MpcTlsConfig::builder()
-        .max_sent_data(MAX_SENT)
-        .max_recv_data(MAX_RECV)
-        .build()?;
-    progress.advance("mpc.preprocessing");
-    let prover = handle
-        .new_prover(ProverConfig::builder().build()?)?
-        .commit(mpc)
-        .await?;
-    progress.advance("revolut.exchanging");
-    let tcp = TcpStream::connect(&server.address).await?;
-    tcp.set_nodelay(true)?;
-    let server_name =
-        || -> Result<ServerName, Error> { Ok(ServerName::Dns(request.host().try_into()?)) };
-    let tls = TlsClientConfig::builder()
-        .server_name(server_name()?)
-        .root_store(server.roots.clone())
-        .build()?;
-    let (connection, prover) = prover.connect(tls, tcp.compat())?;
-    let prover = tokio::spawn(prover.into_future());
-    // The protocol finishes whatever the status, so the notary sees a closed session.
-    let response = http::send(connection.compat(), request).await?;
-    let mut prover = prover.await??;
-    let transcript = prover.transcript().clone();
-    let received = transcript.received();
     let committed = request.committed();
-    if !transcript.sent().starts_with(&committed) {
-        return Err(Error::Rejected);
-    }
-    let mut commit = TranscriptCommitConfig::builder(&transcript);
-    commit.default_kind(TranscriptCommitmentKind::Hash { alg: HASH });
-    commit.commit_sent(&(0..committed.len()))?;
-    commit.commit_recv(&(0..received.len()))?;
-    let commit = commit.build()?;
-    let mut config = RequestConfig::builder();
-    config
-        .signature_alg(SIGNATURE)
-        .hash_alg(HASH)
-        .transcript_commit(commit.clone());
-    let config = config.build()?;
-    let mut prove = ProveConfig::builder(&transcript);
-    prove.server_identity().transcript_commit(commit);
-    progress.advance("commitments.proving");
-    let output = prover.prove(&prove.build()?).await?;
-    let tls = prover.tls_transcript().clone();
-    prover.close().await?;
-
-    progress.advance("attestation.requesting");
-    let provider = crypto::provider();
-    let mut builder = AttestationRequest::builder(&config);
-    builder
-        .server_name(server_name()?)
-        .handshake_data(HandshakeData {
-            certs: tls.server_cert_chain().ok_or(Error::Rejected)?.to_vec(),
-            sig: tls.server_signature().ok_or(Error::Rejected)?.clone(),
-            binding: tls.certificate_binding().clone(),
-        })
-        .transcript(transcript.clone())
-        .transcript_commitments(
-            output.transcript_secrets.clone(),
-            output.transcript_commitments,
-        );
-    let (attestation_request, _) = builder.build(&provider)?;
-    handle.close();
-    let mut socket = driver.await??;
-    socket
-        .write_all(&serde_json::to_vec(&attestation_request)?)
-        .await?;
-    socket.close().await?;
-    let mut attestation = Vec::new();
-    socket.read_to_end(&mut attestation).await?;
-    let attestation: Attestation = serde_json::from_slice(&attestation)?;
-    attestation_request.validate(&attestation, &provider)?;
-    // Everything is read: closing now, with no error, ends the notary's wait for this session.
-    session.close(VarInt::MIN, b"");
+    let notarization = async {
+        let reads = StreamReader::new(notary.await?.error_for_status()?.bytes_stream());
+        let (driver, mut handle) = MpcSession::new(tokio::io::join(reads, writes).compat()).split();
+        let protocol = async {
+            let prover = preprocess(&mut handle).await?;
+            let (prover, response) = exchange(prover, request).await?;
+            let proven = prove(prover, &committed).await?;
+            handle.close();
+            Ok::<_, Error>((proven, response))
+        };
+        let (mut socket, (proven, response)) =
+            tokio::try_join!(async { Ok(driver.await?) }, protocol)?;
+        let (transcript, tls, output, config) = proven;
+        let attestation =
+            request_attestation(&mut socket, request, &transcript, &tls, &output, &config).await?;
+        Ok::<_, Error>((attestation, transcript, output, response))
+    };
+    let ((), (attestation, transcript, output, response)) =
+        tokio::try_join!(connection, notarization)?;
     tracing::info!(
         event.name = "session.notarized",
         server.address = request.host(),
         http.response.status_code = response.status
     );
-    if response.status != 200 {
+    if response.status != StatusCode::OK {
         return Ok((None, response));
     }
-
     let blinder = |direction| {
         output
             .transcript_secrets
@@ -232,19 +141,115 @@ pub async fn notarize(
                 }
                 _ => None,
             })
+            .ok_or(Error::NoBlinder(direction))
     };
     let record = Record {
         attestation,
         request: committed,
-        request_blinder: blinder(Direction::Sent).ok_or(Error::Rejected)?,
-        response: received.to_vec(),
-        response_blinder: blinder(Direction::Received).ok_or(Error::Rejected)?,
+        request_blinder: blinder(Direction::Sent)?,
+        response: transcript.received().to_vec(),
+        response_blinder: blinder(Direction::Received)?,
     };
     Ok((Some(record), response))
 }
 
-/// A record's name: the hash of the committed head, so notarizing a request again replaces it.
-pub fn name(request: &Request) -> String {
-    let digest = tlsn_hash(&request.committed());
-    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+/// MPC preprocessing with the notary, within the transcript limits.
+#[tracing::instrument(skip_all)]
+async fn preprocess(handle: &mut SessionHandle) -> Result<Prover<CommitAccepted<Mpc>>, Error> {
+    let mpc = MpcTlsConfig::builder()
+        .max_sent_data(MAX_SENT)
+        .max_recv_data(MAX_RECV)
+        .build()?;
+    Ok(handle
+        .new_prover(ProverConfig::builder().build()?)?
+        .commit(mpc)
+        .await?)
+}
+
+/// The TLS connection to the request's host and the HTTP exchange, both under MPC; the prover
+/// runs beside the exchange.
+#[tracing::instrument(skip_all, fields(server.address = request.host()))]
+async fn exchange(
+    prover: Prover<CommitAccepted<Mpc>>,
+    request: &Request,
+) -> Result<(Prover<Committed>, Response), Error> {
+    let tcp = TcpStream::connect(request.address()).await?;
+    tcp.set_nodelay(true)?;
+    let tls = TlsClientConfig::builder()
+        .server_name(ServerName::Dns(request.host().try_into()?))
+        .root_store(RootCertStore::mozilla())
+        .build()?;
+    let (connection, prover) = prover.connect(tls, tcp.compat())?;
+    // The protocol finishes whatever the status, so the notary sees a closed session.
+    Ok(tokio::try_join!(
+        async { Ok(prover.await?) },
+        http::send(connection.compat(), request)
+    )?)
+}
+
+/// Commitments to the committed head and the whole response, proven to the notary: the
+/// transcript, the TLS transcript, the prover's output and the attestation request config.
+#[tracing::instrument(skip_all)]
+async fn prove(
+    mut prover: Prover<Committed>,
+    committed: &[u8],
+) -> Result<(Transcript, TlsTranscript, ProverOutput, RequestConfig), Error> {
+    let transcript = prover.transcript().clone();
+    if !transcript.sent().starts_with(committed) {
+        return Err(Error::NotCommitted);
+    }
+    let mut commit = TranscriptCommitConfig::builder(&transcript);
+    commit.default_kind(TranscriptCommitmentKind::Hash { alg: HASH });
+    commit.commit_sent(&(0..committed.len()))?;
+    commit.commit_recv(&(0..transcript.received().len()))?;
+    let commit = commit.build()?;
+    let mut config = RequestConfig::builder();
+    config
+        .signature_alg(SIGNATURE)
+        .hash_alg(HASH)
+        .transcript_commit(commit.clone());
+    let config = config.build()?;
+    let mut prove = ProveConfig::builder(&transcript);
+    prove.server_identity().transcript_commit(commit);
+    let output = prover.prove(&prove.build()?).await?;
+    let tls = prover.tls_transcript().clone();
+    prover.close().await?;
+    Ok((transcript, tls, output, config))
+}
+
+/// The attestation request, sent on `socket` once MPC-TLS has ended, and the notary's
+/// attestation, checked against it.
+#[tracing::instrument(skip_all)]
+async fn request_attestation(
+    socket: &mut (impl AsyncRead + AsyncWrite + Unpin),
+    request: &Request,
+    transcript: &Transcript,
+    tls: &TlsTranscript,
+    output: &ProverOutput,
+    config: &RequestConfig,
+) -> Result<Attestation, Error> {
+    let provider = crypto::provider();
+    let mut builder = AttestationRequest::builder(config);
+    builder
+        .server_name(ServerName::Dns(request.host().try_into()?))
+        .handshake_data(HandshakeData {
+            certs: tls.server_cert_chain().ok_or(Error::NoHandshake)?.to_vec(),
+            sig: tls.server_signature().ok_or(Error::NoHandshake)?.clone(),
+            binding: tls.certificate_binding().clone(),
+        })
+        .transcript(transcript.clone())
+        .transcript_commitments(
+            output.transcript_secrets.clone(),
+            output.transcript_commitments.clone(),
+        );
+    let (attestation_request, _) = builder.build(&provider)?;
+    socket
+        .write_all(&serde_json::to_vec(&attestation_request)?)
+        .await?;
+    socket.close().await?;
+    let mut attestation = Vec::new();
+    socket.read_to_end(&mut attestation).await?;
+    let attestation: Attestation = serde_json::from_slice(&attestation)?;
+    attestation_request.validate(&attestation, &provider)?;
+    Ok(attestation)
 }

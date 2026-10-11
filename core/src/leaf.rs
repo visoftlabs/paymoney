@@ -10,21 +10,42 @@
 
 use crate::{
     Error,
-    attestation::{self, LEAVES, REQUEST, REQUEST_LEN, UUID},
+    attestation::{
+        self, BLINDER_BYTES, HASH_PREFIX, KEY_PREFIX, LEAVES, OPAQUE, REQUEST, REQUEST_LEN,
+        UID_BYTES, UUID, VERSION,
+    },
     circuits::{Built, base_words, equal, finish, vanish},
-    engine::{self, E, F, HEADER, LEG, POSEIDON, TLSN_DOMAIN},
+    engine::{
+        self, D, DIGEST, E, F, HASH_BYTES, HEADER, LEG, PACKED_BYTES, POSEIDON, RATE, TLSN_DOMAIN,
+        WORD_BITS,
+    },
     json,
     patterns::{AMOUNT, HEAD_END, PLAIN_BODY, REQUEST_HEAD, STATUS_LINE},
-    statement::{Amount, Currency, Key, LIMB_BITS, Leg},
-    xmss::{self, BASE, CHAINS, DIGEST_WORDS, LOG_LIFETIME, PublicKey, Signature, TARGET_SUM},
+    statement::{AMOUNT_BITS, Amount, CURRENCY_LETTERS, Currency, Key, LIMB_BITS, Leg},
+    xmss::{
+        self, BASE, CHAINS, DIGEST_WORDS, DIGIT_BITS, DIGITS_PER_WORD, KEY_WORDS, LOG_LIFETIME,
+        PARAMETER, PublicKey, Signature, TARGET_SUM,
+    },
 };
 use p3_circuit::{CircuitBuilder, ExprId, ops::Poseidon2PermCall};
 use p3_field::{BasedVectorSpace, Field as _, PrimeCharacteristicRing, PrimeField32};
 
 /// Calibrated: Revolut's head is 2.9 KB and each leg 1.2 KB; room for three legs.
-pub const MAX_RESPONSE: usize = 8192;
+pub const MAX_RESPONSE: usize = 8 * 1024;
 /// Fields the leaf reads, in witness order: four strings, then the number.
 const FIELDS: [&str; 5] = ["id", "legId", "state", "currency", "amount"];
+const CURRENCY_FIELD: usize = 3;
+const AMOUNT_FIELD: usize = 4;
+/// The response, its blinder and the `0x01` marker, as tlsn hashes a commitment.
+const STREAM: usize = MAX_RESPONSE + BLINDER_BYTES + 1;
+/// Bits of the response length: `MAX_RESPONSE` < 2¹⁶.
+const LENGTH_BITS: usize = 16;
+/// Bits of a JSON depth: the leaf reads depths below 16.
+const DEPTH_BITS: usize = 4;
+/// Bits of the digit count, which is at most `MAX_DIGITS`.
+const DIGIT_COUNT_BITS: usize = MAX_DIGITS.ilog2() as usize + 1;
+/// Payload bytes absorbed per sponge block.
+const BLOCK_BYTES: usize = RATE * PACKED_BYTES;
 pub(crate) const STATUS: &[u8] = b"HTTP/1.1 200 ";
 const COMPLETED: &str = "COMPLETED";
 /// Policy: |amount| < 10^9 minor units: nine digits, below 2^30 and the field modulus.
@@ -34,13 +55,13 @@ pub(crate) const MAX_DIGITS: u32 = 9;
 pub struct Attested<'a> {
     pub key: PublicKey,
     pub signature: Signature,
-    pub uid: [u8; 16],
-    /// Field hashes the leaf takes as given: connection info, ephemeral key, certificate.
-    pub opaque: [[u8; 32]; 3],
+    pub uid: [u8; UID_BYTES],
+    /// Field hashes of `OPAQUE`, which the leaf takes as given.
+    pub opaque: [[u8; HASH_BYTES]; OPAQUE.len()],
     pub request: &'a [u8],
-    pub request_blinder: [u8; 16],
+    pub request_blinder: [u8; BLINDER_BYTES],
     pub response: &'a [u8],
-    pub response_blinder: [u8; 16],
+    pub response_blinder: [u8; BLINDER_BYTES],
 }
 
 /// The accumulator over E that names strings in-circuit: `acc·R + byte`.
@@ -188,7 +209,7 @@ impl Attested<'_> {
         bytes(&mut words, uuid);
         bytes(&mut words, &self.request_blinder);
         let mut stream = [response, &self.response_blinder, &[1]].concat();
-        stream.resize(MAX_RESPONSE + 17, 0);
+        stream.resize(STREAM, 0);
         bytes(&mut words, &stream);
         words.extend((0..MAX_RESPONSE).map(|i| u32::from(i < response.len())));
         words.push(u32::from(chunked));
@@ -279,8 +300,8 @@ impl Gadgets for CircuitBuilder<E> {
         flags
     }
     fn canonical(&mut self, word: ExprId) -> Result<Vec<ExprId>, Error> {
-        // PROOF: a full 31-bit decomposition is pinned below p by `decompose_to_bits` itself.
-        self.bits(word, 31)
+        // PROOF: a full decomposition is pinned below p by `decompose_to_bits` itself.
+        self.bits(word, WORD_BITS)
     }
     fn word_bytes(&mut self, words: &[ExprId]) -> Result<Vec<ExprId>, Error> {
         let mut bytes = Vec::with_capacity(4 * words.len());
@@ -294,12 +315,12 @@ impl Gadgets for CircuitBuilder<E> {
     }
     fn words(&mut self, bytes: &[ExprId]) -> Vec<ExprId> {
         bytes
-            .chunks(3)
+            .chunks(PACKED_BYTES)
             .map(|chunk| self.weighted(chunk, [1, 1 << 8, 1 << 16]))
             .collect()
     }
     fn coefficients(&mut self, values: &[ExprId]) -> Result<Vec<ExprId>, Error> {
-        let mut words = Vec::with_capacity(4 * values.len());
+        let mut words = Vec::with_capacity(D * values.len());
         for value in values {
             let coefficients = self.decompose_ext_to_base_coeffs_via_alu::<F>(*value)?;
             base_words(self, &coefficients)?;
@@ -311,7 +332,7 @@ impl Gadgets for CircuitBuilder<E> {
         let one = self.constant(1);
         let framed = [self.constants(TLSN_DOMAIN), bytes.to_vec(), vec![one]].concat();
         let mut words = self.words(&framed);
-        words.resize(words.len().next_multiple_of(8), ExprId::ZERO);
+        words.resize(words.len().next_multiple_of(RATE), ExprId::ZERO);
         let packed = base_words(self, &words)?;
         let output = self.add_hash_slice(&POSEIDON, &packed, true)?;
         let words = self.coefficients(&output)?;
@@ -339,15 +360,15 @@ pub(crate) fn circuit() -> Result<Built, Error> {
 
 fn statement(g: &mut CircuitBuilder<E>) -> Result<Vec<ExprId>, Error> {
     // Witness, in `Attested::witness` order.
-    let key = g.private(12);
+    let key = g.private(KEY_WORDS);
     base_words(g, &key)?;
     let signature = g.private(xmss::SIGNATURE_WORDS);
     base_words(g, &signature)?;
-    let (uid, _) = g.bytes(16)?;
-    let (opaque, _) = g.bytes(96)?;
+    let (uid, _) = g.bytes(UID_BYTES)?;
+    let (opaque, _) = g.bytes(OPAQUE.len() * HASH_BYTES)?;
     let (uuid, _) = g.bytes(UUID)?;
-    let (request_blinder, _) = g.bytes(16)?;
-    let (stream, bits) = g.bytes(MAX_RESPONSE + 17)?;
+    let (request_blinder, _) = g.bytes(BLINDER_BYTES)?;
+    let (stream, bits) = g.bytes(STREAM)?;
     let mask = g.flags(MAX_RESPONSE);
     let chunked = g.flags(1);
     let chunked = chunked.first().copied().ok_or(Error::Shape)?;
@@ -357,11 +378,7 @@ fn statement(g: &mut CircuitBuilder<E>) -> Result<Vec<ExprId>, Error> {
         .to_vec();
 
     // The notary key's attestation field hash names the notary in the statement.
-    let prefix = [
-        &attestation::VERIFYING_KEY[..],
-        &[attestation::ALGORITHM, 48],
-    ]
-    .concat();
+    let prefix = [&attestation::VERIFYING_KEY[..], &KEY_PREFIX].concat();
     let key_bytes = [g.constants(&prefix), g.word_bytes(&key)?].concat();
     let notary_leaf = g.tlsn_hash(&key_bytes)?;
 
@@ -378,22 +395,19 @@ fn statement(g: &mut CircuitBuilder<E>) -> Result<Vec<ExprId>, Error> {
 
     // Field hashes and the Merkle root, as `attestation::root`.
     let sent_end = g.constants(&(REQUEST_LEN as u64).to_le_bytes());
-    let length = g.bits(response.length, 16)?;
+    let length = g.bits(response.length, LENGTH_BITS)?;
     let mut received_end = length
         .chunks(8)
         .map(|byte| g.weighted(byte, (0..8).map(|i| 1 << i)))
         .collect::<Vec<_>>();
-    received_end.extend(g.constants(&[0; 6]));
-    let leaves = [
-        notary_leaf.clone(),
-        opaque.get(..32).ok_or(Error::Shape)?.to_vec(),
-        opaque.get(32..64).ok_or(Error::Shape)?.to_vec(),
-        opaque.get(64..).ok_or(Error::Shape)?.to_vec(),
+    received_end.extend(g.constants(&[0; size_of::<u64>() - LENGTH_BITS / 8]));
+    let mut level = vec![notary_leaf.clone()];
+    level.extend(opaque.chunks(HASH_BYTES).map(<[ExprId]>::to_vec));
+    level.extend([
         g.constants(&attestation::extension_leaf()),
         commitment(g, 0, sent_end, sent)?,
         commitment(g, 1, received_end, response.digest)?,
-    ];
-    let mut level = leaves.to_vec();
+    ]);
     debug_assert_eq!(level.len(), LEAVES);
     while level.len() > 1 {
         let mut next = Vec::new();
@@ -409,10 +423,10 @@ fn statement(g: &mut CircuitBuilder<E>) -> Result<Vec<ExprId>, Error> {
     let root = level.into_iter().next().ok_or(Error::Shape)?;
 
     // The signed header, packed as `engine::pack`, and the notary's signature on its message.
-    let separator = g.constants(&[0, 0, 0, 0, attestation::ALGORITHM, 32]);
+    let separator = g.constants(&[&VERSION[..], &HASH_PREFIX].concat());
     let marker = g.constant(1);
     let mut message = g.words(&[uid, separator, root, vec![marker]].concat());
-    message.resize(message.len().next_multiple_of(4), ExprId::ZERO);
+    message.resize(message.len().next_multiple_of(D), ExprId::ZERO);
     let message = g.hash(HEADER, &message)?;
     xmss_verify(g, &key, &message, &signature)?;
 
@@ -437,11 +451,11 @@ fn commitment(
         &[
             &attestation::TRANSCRIPT_COMMITMENT[..],
             &[0, direction, 1],
-            &[0; 8],
+            &0u64.to_le_bytes(),
         ]
         .concat(),
     );
-    let tail = g.constants(&[attestation::ALGORITHM, 32]);
+    let tail = g.constants(&HASH_PREFIX);
     g.tlsn_hash(&[head, end, tail, digest].concat())
 }
 
@@ -533,9 +547,10 @@ impl Classes {
         let below10 = g.not(above9);
         let digit = g.mul(h3, below10);
         let hex = g.add(digit, letter);
-        let nine = g.constant(9);
+        // A letter's value is its low nibble plus 9: `a` (low nibble 1) is 10.
+        let letter_offset = g.constant(9);
         let shifted = g.mul(nibble, hex);
-        let hex_value = g.mul_add(letter, nine, shifted);
+        let hex_value = g.mul_add(letter, letter_offset, shifted);
         Ok(Self {
             quote: g.mul(h2, l2),
             backslash: g.mul(h5, lc),
@@ -571,7 +586,10 @@ fn response(
 
     // `mask` is a prefix of ones; past `length + 16` (the blinder) come the marker, then zeros.
     equal(g, at(mask, 0), one);
-    let blinded = |i: usize| if i < 16 { one } else { at(mask, i - 16) };
+    let blinded = |i: usize| match i.checked_sub(BLINDER_BYTES) {
+        None => one,
+        Some(i) => at(mask, i),
+    };
     let mut marker = Vec::with_capacity(stream.len());
     for i in 0..stream.len() {
         if i + 1 < MAX_RESPONSE {
@@ -592,10 +610,10 @@ fn response(
     let domain = g.constants(TLSN_DOMAIN);
     let mut words = g.words(&domain);
     words.extend(g.words(stream));
-    words.resize(words.len().next_multiple_of(8), ExprId::ZERO);
+    words.resize(words.len().next_multiple_of(RATE), ExprId::ZERO);
     let positions = [vec![ExprId::ZERO; TLSN_DOMAIN.len()], marker].concat();
     let blocks = words
-        .chunks(8)
+        .chunks(RATE)
         .map(|block| base_words(g, block))
         .collect::<Result<Vec<_>, _>>()?;
     let mut outputs = Vec::with_capacity(blocks.len());
@@ -619,10 +637,14 @@ fn response(
         })?;
         outputs.push(output);
     }
-    let mut digest = [ExprId::ZERO; 2];
+    let mut digest = [ExprId::ZERO; DIGEST / D];
     for (block, output) in outputs.iter().enumerate() {
-        let window = positions.get(24 * block..).unwrap_or_default();
-        let last = g.sum(window.get(..24.min(window.len())).unwrap_or_default());
+        let window = positions.get(BLOCK_BYTES * block..).unwrap_or_default();
+        let last = g.sum(
+            window
+                .get(..BLOCK_BYTES.min(window.len()))
+                .unwrap_or_default(),
+        );
         for (slot, word) in digest.iter_mut().zip(output) {
             *slot = g.mul_add(last, word.ok_or(Error::Shape)?, *slot);
         }
@@ -640,9 +662,18 @@ fn response(
         .take(MAX_RESPONSE)
         .map(|bits| Classes::of(g, bits))
         .collect::<Result<Vec<_>, _>>()?;
+    // `acc + flag·(acc·(R − 1) + x)` appends digit `x` in radix `R` where `flag` is set.
     let radix_less_one = g.define_const(radix() - E::ONE);
-    let [two, nine, fifteen, open_bracket, quote_byte, byte_radix] =
-        [2, 9, 15, u32::from(b'['), u32::from(b'"'), 255].map(|value| g.constant(value));
+    let [
+        two,
+        decimal_less_one,
+        hex_less_one,
+        open_bracket,
+        quote_byte,
+        byte_less_one,
+    ] = [2, 10 - 1, 16 - 1, u32::from(b'['), u32::from(b'"'), 256 - 1]
+        .map(|value| g.constant(value));
+    let max_digits = g.constant(MAX_DIGITS);
     let plain = g.not(chunked);
     let zero = ExprId::ZERO;
 
@@ -662,11 +693,11 @@ fn response(
     let [mut accumulator, mut seen, mut closed, mut after_colon] = [zero; 4];
     let [mut run, mut number, mut digits, mut negative] = [zero; 4];
     let mut previous_data = zero;
-    let mut fields = [UNSET; 5];
+    let mut fields = [UNSET; FIELDS.len()];
     let [mut currency, mut currency_length] = [zero; 2];
     for i in 0..=MAX_RESPONSE {
         // Depth tests; the close of the JSON after the previous payload byte.
-        let depth_bits = g.bits(depth, 4)?;
+        let depth_bits = g.bits(depth, DEPTH_BITS)?;
         let [d0, d1, d2, d3] = <[ExprId; 4]>::try_from(depth_bits).or(Err(Error::Shape))?;
         let [e0, e1, e2, e3] = [d0, d1, d2, d3].map(|bit| g.not(bit));
         let upper = g.mul(e2, e3);
@@ -724,7 +755,7 @@ fn response(
         let refused = g.mul(framed, refused);
         vanish(g, refused);
         let size_hex = g.mul(size, c.hex);
-        let grown = g.mul_add(rest, fifteen, c.hex_value);
+        let grown = g.mul_add(rest, hex_less_one, c.hex_value);
         let grown = g.mul(size_hex, grown);
         let change = g.sub(grown, data_phase);
         let next_rest = g.mul_add(framed, change, rest);
@@ -760,7 +791,7 @@ fn response(
                 g.mul_add(framed, delta, *phase)
             })
             .collect::<Vec<_>>();
-        let ending = g.not(stepped.get(7).copied().unwrap_or(zero));
+        let ending = g.not(stepped.last().copied().unwrap_or(zero));
         let unfinished = g.product(&[last, chunked, ending]);
         vanish(g, unfinished);
 
@@ -818,15 +849,15 @@ fn response(
             field.ready = g.mul_add(flag, ready, field.ready);
             field.named = g.mul_add(flag, accumulator, field.named);
             field.element = g.mul_add(flag, element, field.element);
-            if f < 4 {
+            if f < AMOUNT_FIELD {
                 // Strings: open on the selection; the value is the content at the closing quote.
                 field.opening = g.mul_add(flag, x, field.opening);
                 let close = g.mul(field.capturing, closing_quote);
                 field.closes = g.add(field.closes, close);
                 field.value = g.mul_add(close, accumulator, field.value);
-                if f == 3 {
+                if f == CURRENCY_FIELD {
                     let counted = g.mul(field.capturing, content);
-                    let shifted = g.mul_add(currency, byte_radix, x);
+                    let shifted = g.mul_add(currency, byte_less_one, x);
                     currency = g.mul_add(counted, shifted, currency);
                     currency_length = g.add(currency_length, counted);
                 }
@@ -836,7 +867,7 @@ fn response(
         }
 
         // The amount: payload characters from its selection to the next ',' or '}'.
-        let selected = at(selections.get(4).ok_or(Error::Shape)?, i);
+        let selected = at(selections.get(AMOUNT_FIELD).ok_or(Error::Shape)?, i);
         let running = g.add(selected, run);
         let stops = g.add(c.comma, c.close);
         let go = g.not(stops);
@@ -851,7 +882,7 @@ fn response(
         vanish(g, wrong);
         let wrong = g.mul(digit, c.above9);
         vanish(g, wrong);
-        let shifted = g.mul_add(number, nine, c.nibble);
+        let shifted = g.mul_add(number, decimal_less_one, c.nibble);
         number = g.mul_add(digit, shifted, number);
         digits = g.add(digits, digit);
         negative = g.add(negative, minus);
@@ -885,7 +916,7 @@ fn response(
         let key = g.define_const(accumulate(name.as_bytes()));
         equal(g, field.named, key);
         equal(g, field.element, fields[0].element);
-        if f < 4 {
+        if f < AMOUNT_FIELD {
             equal(g, field.opening, quote_byte);
             equal(g, field.closes, one);
         }
@@ -893,8 +924,8 @@ fn response(
     let [id, leg, state, _, _] = fields.map(|field| field.value);
     let completed = g.define_const(accumulate(COMPLETED.as_bytes()));
     equal(g, state, completed);
-    let three = g.constant(3);
-    equal(g, currency_length, three);
+    let letters = g.constant(CURRENCY_LETTERS);
+    equal(g, currency_length, letters);
 
     // Key: as `Key::of_leg`, from canonical bits.
     let words = g.coefficients(&[leg])?;
@@ -902,27 +933,32 @@ fn response(
     let mut key = [zero; 2];
     for (limb, word) in key.iter_mut().zip(&hashed) {
         let bits = g.canonical(*word)?;
-        *limb = g.weighted(bits.get(..24).ok_or(Error::Shape)?, (0..24).map(|i| 1 << i));
+        let low = bits.get(..LIMB_BITS as usize).ok_or(Error::Shape)?;
+        *limb = g.weighted(low, (0..LIMB_BITS).map(|i| 1 << i));
     }
 
     // Amount: 1..=9 digits, then 72-bit two's complement limbs.
-    let below = g.sub(nine, digits);
-    g.bits(below, 4)?;
+    let limb = LIMB_BITS as usize;
+    let below = g.sub(max_digits, digits);
+    g.bits(below, DIGIT_COUNT_BITS)?;
     let above = g.sub(digits, one);
-    g.bits(above, 4)?;
-    let value = g.bits(number, 30)?;
+    g.bits(above, DIGIT_COUNT_BITS)?;
+    let value = g.bits(number, AMOUNT_BITS as usize)?;
     let low = g.weighted(
-        value.get(..24).ok_or(Error::Shape)?,
-        (0..24).map(|i| 1 << i),
+        value.get(..limb).ok_or(Error::Shape)?,
+        (0..LIMB_BITS).map(|i| 1 << i),
     );
-    let high = g.weighted(value.get(24..).ok_or(Error::Shape)?, (0..6).map(|i| 1 << i));
-    let low_bits = value.get(..24).ok_or(Error::Shape)?.to_vec();
+    let high = g.weighted(
+        value.get(limb..).ok_or(Error::Shape)?,
+        (0..AMOUNT_BITS - LIMB_BITS).map(|i| 1 << i),
+    );
+    let low_bits = value.get(..limb).ok_or(Error::Shape)?.to_vec();
     let low_zero = {
         let negated = low_bits.iter().map(|bit| g.not(*bit)).collect::<Vec<_>>();
         g.product(&negated)
     };
-    let radix24 = g.constant(1 << 24);
-    let full = g.constant((1 << 24) - 1);
+    let radix24 = g.constant(1 << LIMB_BITS);
+    let full = g.constant((1 << LIMB_BITS) - 1);
     let low_negative = {
         let complement = g.sub(radix24, low);
         let nonzero = g.not(low_zero);
@@ -937,8 +973,8 @@ fn response(
         g.select(negative, high_negative, high),
         g.mul(negative, full),
     ];
-    for limb in amount {
-        g.bits(limb, 24)?;
+    for value in amount {
+        g.bits(value, limb)?;
     }
 
     Ok(Response {
@@ -958,9 +994,12 @@ fn xmss_verify(
     message: &[ExprId],
     signature: &[ExprId],
 ) -> Result<(), Error> {
-    let (parameter, root) = key.split_at_checked(4).ok_or(Error::Shape)?;
+    let (parameter, root) = key.split_at_checked(PARAMETER).ok_or(Error::Shape)?;
     let (epoch, rest) = signature.split_first().ok_or(Error::Shape)?;
-    let blocks = rest.chunks(8).map(<[ExprId]>::to_vec).collect::<Vec<_>>();
+    let blocks = rest
+        .chunks(DIGEST)
+        .map(<[ExprId]>::to_vec)
+        .collect::<Vec<_>>();
     let (randomness, rest) = blocks.split_first().ok_or(Error::Shape)?;
     let (chains, path) = rest.split_at_checked(CHAINS).ok_or(Error::Shape)?;
     let tweak = |a: ExprId, b: ExprId, c: ExprId| [parameter, &[a, b, c, ExprId::ZERO]].concat();
@@ -977,11 +1016,16 @@ fn xmss_verify(
     )?;
     let mut nibbles = Vec::new();
     for word in digest.iter().take(DIGEST_WORDS) {
-        // `digits` rejects p − 1, the only value with bits 24..31 all set.
-        let bits = g.bits(*word, 31)?;
-        let top = g.product(bits.get(24..).ok_or(Error::Shape)?);
+        // `digits` rejects p − 1, the only value with every bit above the digits set.
+        let bits = g.bits(*word, WORD_BITS)?;
+        let span = DIGITS_PER_WORD * DIGIT_BITS;
+        let top = g.product(bits.get(span..).ok_or(Error::Shape)?);
         vanish(g, top);
-        nibbles.extend(bits.chunks(4).take(6).map(<[ExprId]>::to_vec));
+        nibbles.extend(
+            bits.chunks(DIGIT_BITS)
+                .take(DIGITS_PER_WORD)
+                .map(<[ExprId]>::to_vec),
+        );
     }
     let mut sum = zero;
     let mut ends = Vec::with_capacity(CHAINS);
@@ -993,7 +1037,7 @@ fn xmss_verify(
         let [n0, n1, n2, n3] = [b0, b1, b2, b3].map(|bit| g.not(bit));
         let low = [g.mul(n0, n1), g.mul(b0, n1), g.mul(n0, b1), g.mul(b0, b1)];
         let high = [g.mul(n2, n3), g.mul(b2, n3), g.mul(n2, b3), g.mul(b2, b3)];
-        let mut flags = Vec::with_capacity(16);
+        let mut flags = Vec::with_capacity(BASE);
         for high in high {
             for low in low {
                 flags.push(g.mul(low, high));

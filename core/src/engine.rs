@@ -26,11 +26,22 @@ use std::{
     },
 };
 
+/// Degree of the challenge extension `E` over `F`.
+pub(crate) const D: usize = 4;
+/// Poseidon2 state width and sponge rate; a digest is one rate block.
+pub(crate) const WIDTH: usize = 16;
+pub(crate) const RATE: usize = 8;
+pub(crate) const DIGEST: usize = RATE;
+/// Bytes packed into one field word: three bytes stay below p.
+pub(crate) const PACKED_BYTES: usize = 3;
+/// Bits of a canonical field word: p < 2³¹.
+pub(crate) const WORD_BITS: usize = 31;
+
 pub(crate) type F = KoalaBear;
-pub(crate) type E = BinomialExtensionField<F, 4>;
+pub(crate) type E = BinomialExtensionField<F, D>;
 pub(crate) type Config = KoalaBearD4Poseidon2SaltedConfig<Salt>;
 pub(crate) type Backend =
-    p3_recursion::backend::FriRecursionBackendForExt<4, 16, 8, Poseidon2Config>;
+    p3_recursion::backend::FriRecursionBackendForExt<D, WIDTH, RATE, Poseidon2Config>;
 pub(crate) type Inputs = BatchStarkVerifierInputsBuilder<
     Config,
     <Config as FriRecursionConfig>::Commitment,
@@ -50,8 +61,10 @@ pub(crate) const XMSS_MESSAGE: u32 = 0x504d_0405;
 /// The signed attestation header, hashed to the XMSS message.
 pub(crate) const HEADER: u32 = 0x504d_0501;
 
+/// Bytes of a tlsn hash-128 digest: the 8 rate words, little-endian.
+pub const HASH_BYTES: usize = 4 * DIGEST;
 /// Domain of tlsn hash algorithm 128; 30 bytes, so the input starts on a word boundary.
-pub const TLSN_DOMAIN: &[u8; 30] = b"tlsn/poseidon2/koalabear/16/v1";
+pub(crate) const TLSN_DOMAIN: &[u8; 30] = b"tlsn/poseidon2/koalabear/16/v1";
 
 pub(crate) const POSEIDON: Poseidon2Config = Poseidon2Config::KOALA_BEAR_D4_W16;
 // Policy: proof-client's hiding FRI profile; not a composed-security claim.
@@ -70,7 +83,7 @@ pub(crate) const FRI: FriConfigV1 = FriConfigV1::new(
 );
 
 pub(crate) fn backend() -> Backend {
-    FriRecursionBackend::<16, 8, _>::new(POSEIDON).for_extension_degree::<4>()
+    FriRecursionBackend::<WIDTH, RATE, _>::new(POSEIDON).for_extension_degree::<D>()
 }
 
 /// Hiding randomness: seeded while preparing, so every verifier derives the same preprocessing
@@ -154,22 +167,22 @@ pub(crate) fn prepare(
     let (config, fresh) = config()?;
     let mut prover = BatchStarkProver::new(config).with_table_packing(packing);
     for table in
-        <Backend as PcsRecursionBackend<Config, BatchOnly, 4>>::non_primitive_provers(&backend(), 4)
+        <Backend as PcsRecursionBackend<Config, BatchOnly, D>>::non_primitive_provers(&backend(), D)
     {
         prover.register_table_prover(table);
     }
-    prover.register_table_prover(Box::new(StatementProver::<4>::new(schema.clone())));
+    prover.register_table_prover(Box::new(StatementProver::<D>::new(schema.clone())));
     let mut preprocessors =
-        <Backend as PcsRecursionBackend<Config, BatchOnly, 4>>::non_primitive_preprocessors(
+        <Backend as PcsRecursionBackend<Config, BatchOnly, D>>::non_primitive_preprocessors(
             &backend(),
         );
     let mut airs =
-        <Backend as PcsRecursionBackend<Config, BatchOnly, 4>>::non_primitive_air_builders(
+        <Backend as PcsRecursionBackend<Config, BatchOnly, D>>::non_primitive_air_builders(
             &backend(),
         );
     preprocessors.push(Box::new(StatementPreprocessor::new(schema.clone())));
-    airs.push(Box::new(StatementAirBuilder::<4>::new(schema.clone())));
-    let prepared = prover.prepare_circuit::<E, 4>(
+    airs.push(Box::new(StatementAirBuilder::<D>::new(schema.clone())));
+    let prepared = prover.prepare_circuit::<E, D>(
         circuit,
         &preprocessors,
         &airs,
@@ -179,18 +192,18 @@ pub(crate) fn prepare(
     Ok(prepared)
 }
 
-fn sponge(words: impl IntoIterator<Item = F>) -> [F; 8] {
-    PaddingFreeSponge::<_, 16, 8, 8>::new(p3_koala_bear::default_koalabear_poseidon2_16())
+fn sponge(words: impl IntoIterator<Item = F>) -> [F; DIGEST] {
+    PaddingFreeSponge::<_, WIDTH, RATE, DIGEST>::new(p3_koala_bear::default_koalabear_poseidon2_16())
         .hash_iter(words)
 }
 
 /// Native tagged sponge; [`circuit_hash`] computes the same digest in-circuit.
-pub(crate) fn hash(tag: u32, words: &[F]) -> [F; 8] {
+pub(crate) fn hash(tag: u32, words: &[F]) -> [F; DIGEST] {
     let domain = [F::from_u32(tag), F::from_usize(words.len())];
     sponge(
         domain
             .into_iter()
-            .chain([F::ZERO; 6])
+            .chain([F::ZERO; RATE - 2])
             .chain(words.iter().copied()),
     )
 }
@@ -198,10 +211,10 @@ pub(crate) fn hash(tag: u32, words: &[F]) -> [F; 8] {
 /// tlsn hash algorithm 128 (`mpz_hash::poseidon2_koalabear`): `TLSN_DOMAIN ‖ bytes ‖ 0x01` as
 /// little-endian 3-byte words, zero-filled to whole rate blocks, through the overwrite sponge;
 /// the digest is the 8 rate words, little-endian.
-pub fn tlsn_hash(bytes: &[u8]) -> [u8; 32] {
+pub fn tlsn_hash(bytes: &[u8]) -> [u8; HASH_BYTES] {
     let mut words = words(&[TLSN_DOMAIN, bytes, &[1]].concat());
-    words.resize(words.len().next_multiple_of(8), F::ZERO);
-    let mut bytes = [0; 32];
+    words.resize(words.len().next_multiple_of(RATE), F::ZERO);
+    let mut bytes = [0; HASH_BYTES];
     for (out, word) in bytes.as_chunks_mut::<4>().0.iter_mut().zip(sponge(words)) {
         *out = word.as_canonical_u32().to_le_bytes();
     }
@@ -210,8 +223,7 @@ pub fn tlsn_hash(bytes: &[u8]) -> [u8; 32] {
 
 fn words(bytes: &[u8]) -> Vec<F> {
     bytes
-        .chunks(3)
-        // PROOF: three bytes fit below the KoalaBear modulus.
+        .chunks(PACKED_BYTES)
         .map(|chunk| {
             F::from_u32(
                 chunk
@@ -226,7 +238,7 @@ fn words(bytes: &[u8]) -> Vec<F> {
 /// `bytes ‖ 0x01` as little-endian 3-byte words, zero-padded to whole extension elements.
 pub(crate) fn pack(bytes: &[u8]) -> Vec<F> {
     let mut words = words(&[bytes, &[1]].concat());
-    words.resize(words.len().next_multiple_of(4), F::ZERO);
+    words.resize(words.len().next_multiple_of(D), F::ZERO);
     words
 }
 
@@ -234,10 +246,10 @@ pub(crate) fn circuit_hash(
     builder: &mut CircuitBuilder<E>,
     tag: u32,
     input: &[ExprId],
-) -> Result<[ExprId; 2], Error> {
+) -> Result<[ExprId; DIGEST / D], Error> {
     let first = E::from_basis_coefficients_slice(&[
         F::from_u32(tag),
-        F::from_usize(input.len() * 4),
+        F::from_usize(input.len() * D),
         F::ZERO,
         F::ZERO,
     ])

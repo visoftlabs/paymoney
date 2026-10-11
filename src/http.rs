@@ -164,6 +164,11 @@ impl Request {
         &self.host
     }
 
+    /// `host:port`, where the request is sent.
+    pub fn address(&self) -> String {
+        format!("{}:{}", self.host, self.port)
+    }
+
     /// `host[:port]`, the port only when not the default.
     fn authority(&self) -> String {
         match self.url.port() {
@@ -220,7 +225,7 @@ impl Request {
 }
 
 /// A HAR response. Headers are withheld: `set-cookie` can carry the session.
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Response {
     pub status: u16,
@@ -228,7 +233,7 @@ pub struct Response {
     pub headers: [(); 0],
     pub content: Content,
 }
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct Content {
     pub size: usize,
@@ -236,39 +241,26 @@ pub struct Content {
     pub text: String,
 }
 
-/// Where a request's host is reached, and the roots that authenticate it.
-#[derive(Clone)]
-pub struct Server {
-    pub address: String,
-    pub roots: RootCertStore,
-}
-impl Server {
-    /// The URL's host and port, under Mozilla's roots.
-    pub fn of(request: &Request) -> Self {
-        Self {
-            address: format!("{}:{}", request.host, request.port),
-            roots: RootCertStore::mozilla(),
-        }
-    }
-}
-
-/// One exchange over `io`; the connection ends with it.
+/// One exchange over `io`, run beside hyper's connection, which ends once the exchange drops its
+/// sender.
 pub async fn send<T>(io: T, request: &Request) -> Result<Response, Error>
 where
-    T: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    T: AsyncRead + AsyncWrite + Unpin + Send,
 {
     let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(io)).await?;
-    let connection = tokio::spawn(connection);
-    let response = sender.send_request(request.http()?).await?;
-    let status = response.status();
-    // HAR's value for an unknown type.
-    let mime_type = match response.headers().get(CONTENT_TYPE) {
-        Some(value) => text(value.as_bytes()),
-        None => "x-unknown".into(),
+    let exchange = async move {
+        let response = sender.send_request(request.http()?).await?;
+        let status = response.status();
+        // HAR's value for an unknown type.
+        let mime_type = match response.headers().get(CONTENT_TYPE) {
+            Some(value) => text(value.as_bytes()),
+            None => "x-unknown".into(),
+        };
+        let body = response.into_body().collect().await?.to_bytes();
+        Ok::<_, Error>((status, mime_type, body))
     };
-    let body = response.into_body().collect().await?.to_bytes();
-    drop(sender);
-    connection.await??;
+    let ((status, mime_type, body), ()) =
+        tokio::try_join!(exchange, async { Ok(connection.await?) })?;
     tracing::info!(
         event.name = "response.received",
         http.request.method = %request.method,
@@ -288,22 +280,31 @@ where
     })
 }
 
-/// A plain HTTPS exchange.
-pub async fn fetch(request: &Request, server: &Server) -> Result<Response, Error> {
+/// Mozilla's roots, the ones MPC-TLS verifies the server with.
+pub fn roots() -> Result<rustls::RootCertStore, Error> {
     let mut roots = rustls::RootCertStore::empty();
-    for root in &server.roots.roots {
-        roots.add(rustls::pki_types::CertificateDer::from(root.0.clone()))?;
+    for root in RootCertStore::mozilla().roots {
+        roots.add(rustls::pki_types::CertificateDer::from(root.0))?;
     }
+    Ok(roots)
+}
+
+/// A TLS client trusting `roots`.
+pub fn tls(roots: rustls::RootCertStore) -> Result<rustls::ClientConfig, Error> {
     // rustls's own default provider, named: tlsn also compiles `ring`, so rustls cannot choose.
-    let config = rustls::ClientConfig::builder_with_provider(Arc::new(
+    Ok(rustls::ClientConfig::builder_with_provider(Arc::new(
         rustls::crypto::aws_lc_rs::default_provider(),
     ))
     .with_safe_default_protocol_versions()?
     .with_root_certificates(roots)
-    .with_no_client_auth();
+    .with_no_client_auth())
+}
+
+/// A plain HTTPS exchange.
+pub async fn fetch(request: &Request) -> Result<Response, Error> {
     let name = rustls::pki_types::ServerName::try_from(request.host.clone())?;
-    let tcp = TcpStream::connect(&server.address).await?;
-    let tls = tokio_rustls::TlsConnector::from(Arc::new(config))
+    let tcp = TcpStream::connect(request.address()).await?;
+    let tls = tokio_rustls::TlsConnector::from(Arc::new(tls(roots()?)?))
         .connect(name, tcp)
         .await?;
     send(tls, request).await

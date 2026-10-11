@@ -3,10 +3,9 @@
 
 use crate::{
     Error,
-    engine::{self, Backend, CIRCUIT_KEY, Config, E, F, Inputs, VERIFIER_SET},
+    engine::{self, Backend, CIRCUIT_KEY, Config, D, DIGEST, E, F, Inputs, VERIFIER_SET},
     identity::{descriptor, descriptor_digest, key},
     leaf::Attested,
-    progress::Progress,
     shape,
     statement::{COUNT_BITS, Digest, LIMB_BITS, Leg, Statement},
 };
@@ -70,14 +69,14 @@ pub struct LegProof {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum Member {
+enum Member {
     Wrap,
     Merge,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct Aggregate {
-    pub member: Member,
+    member: Member,
     pub statement: Statement,
     proof: BatchStarkProof<Config>,
 }
@@ -110,11 +109,11 @@ pub struct Circuits {
     leaf: Prepared,
     wrap: Prepared,
     merge: Prepared,
-    keys: [[F; 8]; 2],
+    keys: [[F; DIGEST]; 2],
     set: Digest,
 }
 impl Circuits {
-    #[tracing::instrument(name = "circuits", skip_all)]
+    #[tracing::instrument(skip_all)]
     pub fn prepare() -> Result<Self, Error> {
         let leaf = prepared(crate::leaf::circuit()?, engine::packing())?;
         let heights = leaf
@@ -210,30 +209,23 @@ impl Circuits {
     }
 
     /// Sorts legs by key and merges them in a balanced tree.
+    #[tracing::instrument(skip_all)]
     pub fn aggregate(&self, mut legs: Vec<LegProof>) -> Result<Aggregate, Error> {
         legs.sort_by_key(|leg| leg.leg.key);
         // Fail before any proving: the native merges reject what the circuits would.
         let mut statements = legs.iter().map(|leg| Statement::of_leg(self.set, leg.leg));
         let first = statements.next().ok_or(Error::Empty)?;
         statements.try_fold(first, |left, right| Ok::<_, Error>(left.merge(&right)?.0))?;
-        // n leaves are wrapped, then merged pairwise n − 1 times.
-        let mut progress = Progress::new(2 * legs.len() - 1);
         let mut level = legs
             .iter()
-            .map(|leg| {
-                progress.advance("leaf.wrapping");
-                self.wrap(leg)
-            })
+            .map(|leg| self.wrap(leg))
             .collect::<Result<Vec<_>, _>>()?;
         while level.len() > 1 {
             let mut next = Vec::with_capacity(level.len().div_ceil(2));
             let mut nodes = level.into_iter();
             while let Some(left) = nodes.next() {
                 next.push(match nodes.next() {
-                    Some(right) => {
-                        progress.advance("proofs.merging");
-                        self.merge(&left, &right)?
-                    }
+                    Some(right) => self.merge(&left, &right)?,
                     None => left,
                 });
             }
@@ -344,15 +336,17 @@ fn wrap(leaf: &CircuitVerifier<Config>) -> Result<Built, Error> {
 
 fn merge(template: &CircuitVerifier<Config>) -> Result<Built, Error> {
     let mut builder = engine::builder()?;
-    let own = inputs(&mut builder, Statement::WORDS + 6)?;
+    let own = inputs(&mut builder, Statement::WORDS + Statement::HINTS)?;
     let shared = get(&own, Statement::SHARED)?.to_vec();
     let (left_wiring, left) = member(&mut builder, template, &shared)?;
     let (right_wiring, right) = member(&mut builder, template, &shared)?;
     let radix = builder.define_const(E::from_u32(1 << LIMB_BITS));
     let one = builder.define_const(E::ONE);
-    let [gap0, gap1, borrow, c0, c1, c2] =
-        <[ExprId; 6]>::try_from(get(&own, Statement::WORDS..Statement::WORDS + 6)?)
-            .or(Err(Error::Shape))?;
+    let [gap0, gap1, borrow, c0, c1, c2] = <[ExprId; Statement::HINTS]>::try_from(get(
+        &own,
+        Statement::WORDS..Statement::WORDS + Statement::HINTS,
+    )?)
+    .or(Err(Error::Shape))?;
 
     // left.hi + 1 + gap = right.lo over two limbs, so left.hi < right.lo.
     bits(&mut builder, gap0, LIMB_BITS)?;
@@ -428,7 +422,7 @@ fn member(
         let actual = engine::circuit_hash(builder, CIRCUIT_KEY, &packed)?;
         let bit = builder.alloc_private_input("set member");
         builder.assert_bool(bit);
-        let siblings = builder.alloc_private_inputs(8, "set sibling");
+        let siblings = builder.alloc_private_inputs(DIGEST, "set sibling");
         let packed = base_words(builder, &siblings)?;
         let mut words = Vec::new();
         for (node, sibling) in actual.iter().zip(&packed) {
@@ -485,7 +479,7 @@ fn prove(
     runner.set_public_inputs(&public)?;
     runner.set_private_inputs(&private)?;
     for ((wiring, child), statement) in prepared.children.iter().zip(&children).zip(&statements) {
-        <Backend as TrustedPcsRecursionBackend<Config, BatchOnly, 4>>::set_private_data_for_trusted_batch(
+        <Backend as TrustedPcsRecursionBackend<Config, BatchOnly, D>>::set_private_data_for_trusted_batch(
             &engine::backend(),
             &child.prepared.prover.verifier(),
             child.proof,
@@ -507,7 +501,7 @@ fn check(
     statement: &[u32],
 ) -> Result<(), Error> {
     let verifier = prepared.prover.verifier();
-    <Backend as TrustedPcsRecursionBackend<Config, BatchOnly, 4>>::preflight_trusted_batch(
+    <Backend as TrustedPcsRecursionBackend<Config, BatchOnly, D>>::preflight_trusted_batch(
         &engine::backend(),
         &verifier,
         proof,
@@ -552,9 +546,9 @@ pub(crate) fn base_words(
     words: &[ExprId],
 ) -> Result<Vec<ExprId>, Error> {
     let mut result = Vec::new();
-    for chunk in words.chunks(4) {
+    for chunk in words.chunks(D) {
         let mut padded = chunk.to_vec();
-        padded.resize(4, ExprId::ZERO);
+        padded.resize(D, ExprId::ZERO);
         let value = builder.recompose_base_coeffs_to_ext_via_alu::<F>(&padded)?;
         let bound = builder.recompose_base_coeffs_to_ext_with_coeff_lookups::<F>(&padded)?;
         builder.connect(value, bound);
