@@ -47,7 +47,8 @@ pub struct Client {
     endpoint: quinn::Endpoint,
 }
 impl Client {
-    /// Binds the endpoint on IPv6, as quinn's and h3's client examples do.
+    /// Binds the endpoint on `[::]`, as quinn's and h3's client examples do; it reaches IPv4
+    /// servers too, as mapped addresses.
     pub fn bind() -> Result<Self, Error> {
         let endpoint = quinn::Endpoint::client((Ipv6Addr::UNSPECIFIED, 0).into())?;
         Ok(Self { endpoint })
@@ -72,11 +73,8 @@ impl Client {
         let (Some(host), Some(port)) = (url.host_str(), url.port_or_known_default()) else {
             return Err(Error::Scheme(url));
         };
-        // IPv6 only: `localhost` is `::1`.
-        let Some(address) = tokio::net::lookup_host((host, port))
-            .await?
-            .find(std::net::SocketAddr::is_ipv6)
-        else {
+        // The resolver's order (RFC 6724): IPv6 first where it is reachable.
+        let Some(address) = tokio::net::lookup_host((host, port)).await?.next() else {
             return Err(Error::Scheme(url));
         };
         let roots = match &server.certificate {

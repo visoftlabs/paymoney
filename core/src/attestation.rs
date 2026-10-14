@@ -31,7 +31,8 @@ pub(crate) const HASH_PREFIX: [u8; 2] = [ALGORITHM, HASH_BYTES as u8];
 /// BCS of `Header::version`, a `u32` zero.
 pub(crate) const VERSION: [u8; 4] = [0; 4];
 pub const REQUEST_LEN: usize = REQUEST[0].len() + UUID + REQUEST[1].len();
-/// Leaves in field-id order: key, connection, ephemeral key, certificate, extension, sent, received.
+/// Leaves in field-id order: key, connection, ephemeral key, certificate, extension, sent,
+/// received.
 pub const LEAVES: usize = 7;
 
 // PROOF: tlsn's `impl_domain_separator!` domains, the first 16 bytes of BLAKE3 of each type's path
