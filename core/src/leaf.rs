@@ -38,6 +38,8 @@ const CURRENCY_FIELD: usize = 3;
 const AMOUNT_FIELD: usize = 4;
 /// The response, its blinder and the `0x01` marker, as tlsn hashes a commitment.
 const STREAM: usize = MAX_RESPONSE + BLINDER_BYTES + 1;
+/// The earliest body offset: the head ends with CR LF CR LF, so bytes 0–3 are head.
+const FIRST_BODY: usize = 4;
 /// Bits of the response length: `MAX_RESPONSE` < 2¹⁶.
 const LENGTH_BITS: usize = 16;
 /// Bits of a JSON depth: the leaf reads depths below 16.
@@ -213,7 +215,7 @@ impl Attested<'_> {
         bytes(&mut words, &stream);
         words.extend((0..MAX_RESPONSE).map(|i| u32::from(i < response.len())));
         words.push(u32::from(chunked));
-        words.extend(inverses);
+        words.extend(inverses.iter().skip(FIRST_BODY));
         for field in fields {
             let (offset, _) = payload.get(field.at).copied().ok_or(Error::Response)?;
             words.extend((1..MAX_RESPONSE).map(|i| u32::from(i == offset)));
@@ -372,7 +374,7 @@ fn statement(g: &mut CircuitBuilder<E>) -> Result<Vec<ExprId>, Error> {
     let mask = g.flags(MAX_RESPONSE);
     let chunked = g.flags(1);
     let chunked = chunked.first().copied().ok_or(Error::Shape)?;
-    let inverses = g.private(MAX_RESPONSE);
+    let inverses = g.private(MAX_RESPONSE - FIRST_BODY);
     let selections = FIELDS
         .map(|_| [vec![ExprId::ZERO], g.flags(MAX_RESPONSE - 1)].concat())
         .to_vec();
@@ -759,12 +761,18 @@ fn response(
         let grown = g.mul(size_hex, grown);
         let change = g.sub(grown, data_phase);
         let next_rest = g.mul_add(framed, change, rest);
-        // `next_rest == 0`, from the prover's inverse: `z = 1 − r·r⁻¹` and `r·z = 0`.
-        let inverse = at(inverses, i);
-        let product = g.mul(next_rest, inverse);
-        let next_zero = g.not(product);
-        let check = g.mul(next_rest, next_zero);
-        vanish(g, check);
+        // `next_rest == 0`, from the prover's inverse: `z = 1 − r·r⁻¹` and `r·z = 0`. Before the
+        // first body byte nothing is framed, so `next_rest` is 0 and needs no inverse.
+        let next_zero = match i.checked_sub(FIRST_BODY) {
+            None => one,
+            Some(j) => {
+                let product = g.mul(next_rest, at(inverses, j));
+                let next_zero = g.not(product);
+                let check = g.mul(next_rest, next_zero);
+                vanish(g, check);
+                next_zero
+            }
+        };
         let (not_zero, not_next_zero) = (g.not(rest_zero), g.not(next_zero));
         let next = [
             g.add(size_hex, data_lf),

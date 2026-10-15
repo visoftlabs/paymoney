@@ -218,7 +218,9 @@ A rebase may leave older lockfiles pinning commits no branch reaches.
 ```sh
 cargo fmt --check
 cargo clippy --release --all-targets -- -D warnings
+cargo test --release
 ```
 
-No automated tests in this version; the pipeline is checked by hand through paymoney-finance's
-guide.
+The one test prepares every circuit (4 s in release): Plonky3-recursion rejects a circuit when
+preparing it, not when building it, so a dependency bump must pass it. The rest of the pipeline
+is checked by hand through paymoney-finance's guide.
