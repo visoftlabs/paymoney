@@ -390,7 +390,7 @@ checksum = "e8cf2a2c93cd704877c0858356ed03480ff301ee950b43f1cbe4573b088bfa6c"
 dependencies = [
  "block-buffer 0.12.1",
  "crypto-common 0.2.2",
- "inout 0.2.2",
+ "inout 0.2.3",
 ]
 
 [[package]]
@@ -1619,9 +1619,9 @@ dependencies = [
 
 [[package]]
 name = "inout"
-version = "0.2.2"
+version = "0.2.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4250ce6452e92010fdf7268ccc5d14faa80bb12fc741938534c58f16804e03c7"
+checksum = "d8c0d789294fb457b791f7797a04478704788f30b407e5d0b01deaa846572d9f"
 dependencies = [
  "hybrid-array",
 ]
@@ -2584,7 +2584,7 @@ dependencies = [
 [[package]]
 name = "p3-circuit"
 version = "0.1.0"
-source = "git+https://github.com/visoftlabs/Plonky3-recursion?branch=feat%2Fpaymoney#486eeb581f5f81d915e695954b9d59c9fd935935"
+source = "git+https://github.com/visoftlabs/Plonky3-recursion?branch=feat%2Fpaymoney#08489a25aebd2bf7c0af45de227931ea4d13e0a6"
 dependencies = [
  "hashbrown 0.17.1",
  "itertools",
@@ -2615,7 +2615,7 @@ dependencies = [
 [[package]]
 name = "p3-circuit-prover"
 version = "0.1.0"
-source = "git+https://github.com/visoftlabs/Plonky3-recursion?branch=feat%2Fpaymoney#486eeb581f5f81d915e695954b9d59c9fd935935"
+source = "git+https://github.com/visoftlabs/Plonky3-recursion?branch=feat%2Fpaymoney#08489a25aebd2bf7c0af45de227931ea4d13e0a6"
 dependencies = [
  "hashbrown 0.17.1",
  "p3-air",
@@ -2930,7 +2930,7 @@ dependencies = [
 [[package]]
 name = "p3-poseidon-circuit-cols"
 version = "0.1.0"
-source = "git+https://github.com/visoftlabs/Plonky3-recursion?branch=feat%2Fpaymoney#486eeb581f5f81d915e695954b9d59c9fd935935"
+source = "git+https://github.com/visoftlabs/Plonky3-recursion?branch=feat%2Fpaymoney#08489a25aebd2bf7c0af45de227931ea4d13e0a6"
 
 [[package]]
 name = "p3-poseidon1"
@@ -2963,7 +2963,7 @@ dependencies = [
 [[package]]
 name = "p3-poseidon1-circuit-air"
 version = "0.1.0"
-source = "git+https://github.com/visoftlabs/Plonky3-recursion?branch=feat%2Fpaymoney#486eeb581f5f81d915e695954b9d59c9fd935935"
+source = "git+https://github.com/visoftlabs/Plonky3-recursion?branch=feat%2Fpaymoney#08489a25aebd2bf7c0af45de227931ea4d13e0a6"
 dependencies = [
  "p3-air",
  "p3-baby-bear",
@@ -3015,7 +3015,7 @@ dependencies = [
 [[package]]
 name = "p3-poseidon2-circuit-air"
 version = "0.1.0"
-source = "git+https://github.com/visoftlabs/Plonky3-recursion?branch=feat%2Fpaymoney#486eeb581f5f81d915e695954b9d59c9fd935935"
+source = "git+https://github.com/visoftlabs/Plonky3-recursion?branch=feat%2Fpaymoney#08489a25aebd2bf7c0af45de227931ea4d13e0a6"
 dependencies = [
  "p3-air",
  "p3-baby-bear",
@@ -3038,7 +3038,7 @@ dependencies = [
 [[package]]
 name = "p3-recursion"
 version = "0.1.0"
-source = "git+https://github.com/visoftlabs/Plonky3-recursion?branch=feat%2Fpaymoney#486eeb581f5f81d915e695954b9d59c9fd935935"
+source = "git+https://github.com/visoftlabs/Plonky3-recursion?branch=feat%2Fpaymoney#08489a25aebd2bf7c0af45de227931ea4d13e0a6"
 dependencies = [
  "blake3",
  "hashbrown 0.17.1",
