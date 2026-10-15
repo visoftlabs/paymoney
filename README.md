@@ -193,17 +193,17 @@ Revolut answered 400 to only `cookie`, `x-device-id`, `x-client-version` and
 
 2026-10-08, a local fixture, release, 16-core Apple Silicon: commitments for a 785-byte response 4.8 s;
 preparing the circuits 2.3 s; one leaf 9.5 s (largest table 2²¹ rows); aggregating 3 legs 10 s.
-A real 4.1 KB Revolut response is not yet measured.
+A real 4.1 KB Revolut response is not yet measured. These figures predate Plonky3 `0.9.0-rc.1`
+and upstream Plonky3-recursion's one-worker hiding pool; re-timing `prove` and `aggregate` on
+this stack resolves them.
 
 ## Forks
 
-Each fork's `feat/paymoney` is rebased on an unpatched mirror of upstream; consumers reference it
-by branch and `Cargo.lock` pins the commit. Before rewriting a branch, tag and push its old head
-so locked commits stay fetchable.
+Plonky3 is upstream's `0.9.0-rc.1` from crates.io. Each fork's `feat/paymoney` is rebased on an
+unpatched mirror of upstream; consumers reference it by branch and `Cargo.lock` pins the commit.
+A rebase may leave older lockfiles pinning commits no branch reaches.
 
-- **Plonky3** (`v0.8.0`): parallel coset LDEs and sumcheck gather; the hiding PCS/MMCS derives a
-  child RNG before nested Rayon work.
-- **Plonky3-recursion**: the Plonky3 fork, `preprocessed_commitment()`, no one-worker pool.
+- **Plonky3-recursion** (upstream `main`): `preprocessed_commitment()`.
 - **mpz2**: the Poseidon2-KoalaBear boolean circuit (0.96 M AND gates per permutation) and the VM
   byte hash.
 - **tlsn**: `HashAlgId::POSEIDON2_KOALABEAR` and its commitment arm; public `Body::hash_fields`.
