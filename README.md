@@ -156,8 +156,9 @@ Chrome keeps in its own log, with OpenTelemetry attribute names (`event.name`, `
 first event per request, `message.received`, carries the request with attached values redacted.
 Protocol steps are spans: `notarize` runs `connect`, `preprocess`, `exchange`, `prove`,
 `request_attestation`; `prove` and `aggregate` run `prepare`, then `prove_leg`, or `wrap` per leg
-and `merge` per pair. `RUST_LOG` overrides the INFO default. Release builds only: debug builds run
-Plonky3's serial self-checks.
+and `merge` per pair. The same records, plus each span's `new` and `close` (with `time.busy`),
+also go to stdout as `log` notifications before the response. `RUST_LOG` overrides the INFO
+default. Release builds only: debug builds run Plonky3's serial self-checks.
 
 | Method        | Params              | Result                                                                     |
 | ------------- | ------------------- | -------------------------------------------------------------------------- |
