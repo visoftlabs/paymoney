@@ -1,0 +1,32 @@
+[package]
+name = "paymoney"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+dirs.workspace = true
+futures.workspace = true
+h3.workspace = true
+h3-quinn.workspace = true
+http-body-util.workspace = true
+hyper.workspace = true
+jsonrpsee-types.workspace = true
+native_messaging.workspace = true
+hyper-util.workspace = true
+paymoney-core.workspace = true
+quinn.workspace = true
+regex.workspace = true
+rustls.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_with.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tlsn.workspace = true
+tokio.workspace = true
+tokio-rustls.workspace = true
+tokio-util.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+url.workspace = true
+uuid.workspace = true

@@ -6,7 +6,7 @@ use crate::{
     engine::{self, Backend, CIRCUIT_KEY, Config, D, DIGEST, E, F, Inputs, VERIFIER_SET},
     identity::{descriptor, descriptor_digest, key},
     leaf::Attested,
-    shape,
+    private, shape,
     statement::{COUNT_BITS, Digest, LIMB_BITS, Leg, Statement},
 };
 use p3_circuit::{
@@ -271,12 +271,6 @@ fn get(wires: &[ExprId], range: Range<usize>) -> Result<&[ExprId], Error> {
 fn at(wires: &[ExprId], index: usize) -> Result<ExprId, Error> {
     wires.get(index).copied().ok_or(Error::Shape)
 }
-/// Private base-field inputs, supplied in allocation order when proving.
-fn inputs(builder: &mut CircuitBuilder<E>, count: usize) -> Result<Vec<ExprId>, Error> {
-    let wires = builder.alloc_private_inputs(count, "witness");
-    base_words(builder, &wires)?;
-    Ok(wires)
-}
 fn bits(builder: &mut CircuitBuilder<E>, wire: ExprId, bits: u32) -> Result<(), Error> {
     builder.decompose_to_bits::<F>(wire, bits as usize)?;
     Ok(())
@@ -306,7 +300,7 @@ pub(crate) fn finish(
 
 fn wrap(leaf: &CircuitVerifier<Config>) -> Result<Built, Error> {
     let mut builder = engine::builder()?;
-    let own = inputs(&mut builder, Statement::WORDS)?;
+    let own = private::words(&mut builder, "witness", Statement::WORDS)?;
     let (inputs, ops) = shape::allocate(&mut builder, leaf, Leg::WORDS, |builder, inputs| {
         let expected = &leaf
             .common_data()
@@ -336,7 +330,7 @@ fn wrap(leaf: &CircuitVerifier<Config>) -> Result<Built, Error> {
 
 fn merge(template: &CircuitVerifier<Config>) -> Result<Built, Error> {
     let mut builder = engine::builder()?;
-    let own = inputs(&mut builder, Statement::WORDS + Statement::HINTS)?;
+    let own = private::words(&mut builder, "witness", Statement::WORDS + Statement::HINTS)?;
     let shared = get(&own, Statement::SHARED)?.to_vec();
     let (left_wiring, left) = member(&mut builder, template, &shared)?;
     let (right_wiring, right) = member(&mut builder, template, &shared)?;
@@ -420,9 +414,8 @@ fn member(
         key_words.extend(cap.iter().flatten().copied());
         let packed = base_words(builder, &key_words)?;
         let actual = engine::circuit_hash(builder, CIRCUIT_KEY, &packed)?;
-        let bit = builder.alloc_private_input("set member");
-        builder.assert_bool(bit);
-        let siblings = builder.alloc_private_inputs(DIGEST, "set sibling");
+        let bit = private::flag(builder, "set member");
+        let siblings = private::words(builder, "set sibling", DIGEST)?;
         let packed = base_words(builder, &siblings)?;
         let mut words = Vec::new();
         for (node, sibling) in actual.iter().zip(&packed) {

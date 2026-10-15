@@ -1,5 +1,6 @@
 [workspace]
-members = ["core"]
+members = ["core", "host"]
+resolver = "3"
 
 [workspace.dependencies]
 paymoney-core = { path = "core" }
@@ -47,36 +48,3 @@ tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", features = ["env-filter", "json"] }
 url = { version = "2.5.8", features = ["serde"] }
 uuid = { version = "1.28.0", features = ["serde", "v4"] }
-
-[package]
-name = "paymoney"
-version = "0.1.0"
-edition = "2024"
-
-[dependencies]
-dirs.workspace = true
-futures.workspace = true
-h3.workspace = true
-h3-quinn.workspace = true
-http-body-util.workspace = true
-hyper.workspace = true
-jsonrpsee-types.workspace = true
-native_messaging.workspace = true
-hyper-util.workspace = true
-paymoney-core.workspace = true
-quinn.workspace = true
-regex.workspace = true
-rustls.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-serde_with.workspace = true
-tempfile.workspace = true
-thiserror.workspace = true
-tlsn.workspace = true
-tokio.workspace = true
-tokio-rustls.workspace = true
-tokio-util.workspace = true
-tracing.workspace = true
-tracing-subscriber.workspace = true
-url.workspace = true
-uuid.workspace = true

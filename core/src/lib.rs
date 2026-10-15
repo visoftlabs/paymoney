@@ -8,6 +8,7 @@ mod identity;
 mod json;
 mod leaf;
 mod patterns;
+mod private;
 mod shape;
 mod statement;
 mod xmss;

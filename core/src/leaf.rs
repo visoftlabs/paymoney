@@ -21,6 +21,7 @@ use crate::{
     },
     json,
     patterns::{AMOUNT, HEAD_END, PLAIN_BODY, REQUEST_HEAD, STATUS_LINE},
+    private::{self, Bytes},
     statement::{AMOUNT_BITS, Amount, CURRENCY_LETTERS, Currency, Key, LIMB_BITS, Leg},
     xmss::{
         self, BASE, CHAINS, DIGEST_WORDS, DIGIT_BITS, DIGITS_PER_WORD, KEY_WORDS, LOG_LIFETIME,
@@ -195,32 +196,208 @@ impl Attested<'_> {
             amount: Amount::new(minor)?,
         };
 
-        let mut words = Vec::new();
-        let bytes =
-            |words: &mut Vec<u32>, bytes: &[u8]| words.extend(bytes.iter().map(|b| u32::from(*b)));
-        let key = self.key.to_bytes();
-        words.extend(
-            key.as_chunks::<4>()
-                .0
-                .iter()
-                .map(|b| u32::from_le_bytes(*b)),
-        );
-        words.extend(self.signature.words());
-        bytes(&mut words, &self.uid);
-        self.opaque.iter().for_each(|leaf| bytes(&mut words, leaf));
-        bytes(&mut words, uuid);
-        bytes(&mut words, &self.request_blinder);
         let mut stream = [response, &self.response_blinder, &[1]].concat();
         stream.resize(STREAM, 0);
-        bytes(&mut words, &stream);
-        words.extend((0..MAX_RESPONSE).map(|i| u32::from(i < response.len())));
-        words.push(u32::from(chunked));
-        words.extend(inverses.iter().skip(FIRST_BODY));
-        for field in fields {
-            let (offset, _) = payload.get(field.at).copied().ok_or(Error::Response)?;
-            words.extend((1..MAX_RESPONSE).map(|i| u32::from(i == offset)));
+        let selections = fields
+            .iter()
+            .map(|field| {
+                let (offset, _) = payload.get(field.at).copied().ok_or(Error::Response)?;
+                Ok((1..MAX_RESPONSE).map(|i| i == offset).collect())
+            })
+            .collect::<Result<Vec<_>, Error>>()?;
+        let values = Inputs {
+            key: self
+                .key
+                .to_bytes()
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| u32::from_le_bytes(*b))
+                .collect(),
+            signature: self.signature.words(),
+            uid: self.uid.to_vec(),
+            opaque: self.opaque.concat(),
+            uuid: uuid.to_vec(),
+            request_blinder: self.request_blinder.to_vec(),
+            stream,
+            mask: (0..MAX_RESPONSE).map(|i| i < response.len()).collect(),
+            chunked,
+            inverses: inverses.into_iter().skip(FIRST_BODY).collect(),
+            selections: selections.try_into().or(Err(Error::Shape))?,
+        };
+        Ok((leg, encode(values)?))
+    }
+}
+
+/// The run types of one view of the leaf's private inputs.
+trait Kinds {
+    type Words;
+    type Bytes;
+    type Flags;
+    type Flag;
+}
+
+/// Run lengths.
+struct Layout;
+impl Kinds for Layout {
+    type Words = usize;
+    type Bytes = usize;
+    type Flags = usize;
+    type Flag = ();
+}
+
+/// The inputs as circuit wires.
+struct Wires;
+impl Kinds for Wires {
+    type Words = Vec<ExprId>;
+    type Bytes = Bytes;
+    type Flags = Vec<ExprId>;
+    type Flag = ExprId;
+}
+
+/// The inputs as witness values.
+struct Values;
+impl Kinds for Values {
+    type Words = Vec<u32>;
+    type Bytes = Vec<u8>;
+    type Flags = Vec<bool>;
+    type Flag = bool;
+}
+
+/// What a visitor that only consumes leaves behind.
+struct Done;
+impl Kinds for Done {
+    type Words = ();
+    type Bytes = ();
+    type Flags = ();
+    type Flag = ();
+}
+
+/// The leaf's private inputs by name; [`Inputs::visit`] fixes their order for both the circuit
+/// and the witness.
+struct Inputs<K: Kinds> {
+    key: K::Words,
+    signature: K::Words,
+    uid: K::Bytes,
+    opaque: K::Bytes,
+    uuid: K::Bytes,
+    request_blinder: K::Bytes,
+    stream: K::Bytes,
+    mask: K::Flags,
+    chunked: K::Flag,
+    inverses: K::Words,
+    selections: [K::Flags; FIELDS.len()],
+}
+
+/// Run lengths, as the circuit allocates them.
+const LAYOUT: Inputs<Layout> = Inputs {
+    key: KEY_WORDS,
+    signature: xmss::SIGNATURE_WORDS,
+    uid: UID_BYTES,
+    opaque: OPAQUE.len() * HASH_BYTES,
+    uuid: UUID,
+    request_blinder: BLINDER_BYTES,
+    stream: STREAM,
+    mask: MAX_RESPONSE,
+    chunked: (),
+    inverses: MAX_RESPONSE - FIRST_BODY,
+    selections: [MAX_RESPONSE - 1; FIELDS.len()],
+};
+
+/// Maps each input of view `K` by its kind into view `Self::Out`.
+trait Visit<K: Kinds> {
+    type Out: Kinds;
+    fn words(&mut self, run: K::Words) -> Result<<Self::Out as Kinds>::Words, Error>;
+    fn bytes(&mut self, run: K::Bytes) -> Result<<Self::Out as Kinds>::Bytes, Error>;
+    fn flags(&mut self, run: K::Flags) -> Result<<Self::Out as Kinds>::Flags, Error>;
+    fn flag(&mut self, one: K::Flag) -> Result<<Self::Out as Kinds>::Flag, Error>;
+}
+
+impl<K: Kinds> Inputs<K> {
+    /// Visits the inputs in allocation order: a struct literal evaluates its fields as written,
+    /// so this literal is the one definition of the leaf's witness layout.
+    fn visit<V: Visit<K>>(self, v: &mut V) -> Result<Inputs<V::Out>, Error> {
+        Ok(Inputs {
+            key: v.words(self.key)?,
+            signature: v.words(self.signature)?,
+            uid: v.bytes(self.uid)?,
+            opaque: v.bytes(self.opaque)?,
+            uuid: v.bytes(self.uuid)?,
+            request_blinder: v.bytes(self.request_blinder)?,
+            stream: v.bytes(self.stream)?,
+            mask: v.flags(self.mask)?,
+            chunked: v.flag(self.chunked)?,
+            inverses: v.words(self.inverses)?,
+            selections: self
+                .selections
+                .into_iter()
+                .map(|run| v.flags(run))
+                .collect::<Result<Vec<_>, _>>()?
+                .try_into()
+                .or(Err(Error::Shape))?,
+        })
+    }
+}
+
+/// The witness words in allocation order, each run's length checked against [`LAYOUT`].
+fn encode(values: Inputs<Values>) -> Result<Vec<u32>, Error> {
+    let mut lengths = Lengths(Vec::new());
+    LAYOUT.visit(&mut lengths)?;
+    let mut encode = Encode {
+        lengths: lengths.0.into_iter(),
+        words: Vec::new(),
+    };
+    values.visit(&mut encode)?;
+    Ok(encode.words)
+}
+
+struct Lengths(Vec<usize>);
+impl Visit<Layout> for Lengths {
+    type Out = Done;
+    fn words(&mut self, run: usize) -> Result<(), Error> {
+        self.0.push(run);
+        Ok(())
+    }
+    fn bytes(&mut self, run: usize) -> Result<(), Error> {
+        self.0.push(run);
+        Ok(())
+    }
+    fn flags(&mut self, run: usize) -> Result<(), Error> {
+        self.0.push(run);
+        Ok(())
+    }
+    fn flag(&mut self, (): ()) -> Result<(), Error> {
+        Ok(())
+    }
+}
+
+struct Encode {
+    lengths: std::vec::IntoIter<usize>,
+    words: Vec<u32>,
+}
+impl Encode {
+    fn run(&mut self, run: impl ExactSizeIterator<Item = u32>) -> Result<(), Error> {
+        if self.lengths.next() != Some(run.len()) {
+            return Err(Error::Shape);
         }
-        Ok((leg, words))
+        self.words.extend(run);
+        Ok(())
+    }
+}
+impl Visit<Values> for Encode {
+    type Out = Done;
+    fn words(&mut self, run: Vec<u32>) -> Result<(), Error> {
+        self.run(run.into_iter())
+    }
+    fn bytes(&mut self, run: Vec<u8>) -> Result<(), Error> {
+        self.run(run.into_iter().map(u32::from))
+    }
+    fn flags(&mut self, run: Vec<bool>) -> Result<(), Error> {
+        self.run(run.into_iter().map(u32::from))
+    }
+    fn flag(&mut self, one: bool) -> Result<(), Error> {
+        self.words.push(u32::from(one));
+        Ok(())
     }
 }
 
@@ -230,16 +407,12 @@ impl Attested<'_> {
 trait Gadgets {
     fn constant(&mut self, value: u32) -> ExprId;
     fn constants(&mut self, bytes: &[u8]) -> Vec<ExprId>;
-    fn private(&mut self, count: usize) -> Vec<ExprId>;
     fn bits(&mut self, value: ExprId, count: usize) -> Result<Vec<ExprId>, Error>;
     fn not(&mut self, value: ExprId) -> ExprId;
     fn product(&mut self, values: &[ExprId]) -> ExprId;
     fn sum(&mut self, values: &[ExprId]) -> ExprId;
     /// Σ weightᵢ·valueᵢ.
     fn weighted(&mut self, values: &[ExprId], weights: impl IntoIterator<Item = u32>) -> ExprId;
-    /// Private bytes, each range-checked to 8 bits; returns the bytes and their bits.
-    fn bytes(&mut self, count: usize) -> Result<(Vec<ExprId>, Vec<Vec<ExprId>>), Error>;
-    fn flags(&mut self, count: usize) -> Vec<ExprId>;
     /// The canonical bits of a field word.
     fn canonical(&mut self, word: ExprId) -> Result<Vec<ExprId>, Error>;
     /// Field words as their canonical little-endian bytes.
@@ -260,9 +433,6 @@ impl Gadgets for CircuitBuilder<E> {
     }
     fn constants(&mut self, bytes: &[u8]) -> Vec<ExprId> {
         bytes.iter().map(|b| self.constant(u32::from(*b))).collect()
-    }
-    fn private(&mut self, count: usize) -> Vec<ExprId> {
-        self.alloc_private_inputs(count, "leaf witness")
     }
     fn bits(&mut self, value: ExprId, count: usize) -> Result<Vec<ExprId>, Error> {
         Ok(self.decompose_to_bits::<F>(value, count)?)
@@ -287,19 +457,6 @@ impl Gadgets for CircuitBuilder<E> {
             acc = self.mul_add(*value, weight, acc);
         }
         acc
-    }
-    fn bytes(&mut self, count: usize) -> Result<(Vec<ExprId>, Vec<Vec<ExprId>>), Error> {
-        let bytes = self.private(count);
-        let bits = bytes
-            .iter()
-            .map(|byte| self.bits(*byte, 8))
-            .collect::<Result<_, _>>()?;
-        Ok((bytes, bits))
-    }
-    fn flags(&mut self, count: usize) -> Vec<ExprId> {
-        let flags = self.private(count);
-        flags.iter().for_each(|flag| self.assert_bool(*flag));
-        flags
     }
     fn canonical(&mut self, word: ExprId) -> Result<Vec<ExprId>, Error> {
         // PROOF: a full decomposition is pinned below p by `decompose_to_bits` itself.
@@ -353,6 +510,24 @@ impl Gadgets for CircuitBuilder<E> {
     }
 }
 
+/// Allocates each run with the constraint that creates it.
+struct Allocate<'a>(&'a mut CircuitBuilder<E>);
+impl Visit<Layout> for Allocate<'_> {
+    type Out = Wires;
+    fn words(&mut self, run: usize) -> Result<Vec<ExprId>, Error> {
+        private::words(self.0, "leaf words", run)
+    }
+    fn bytes(&mut self, run: usize) -> Result<Bytes, Error> {
+        private::bytes(self.0, "leaf bytes", run)
+    }
+    fn flags(&mut self, run: usize) -> Result<Vec<ExprId>, Error> {
+        Ok(private::flags(self.0, "leaf flags", run))
+    }
+    fn flag(&mut self, (): ()) -> Result<ExprId, Error> {
+        Ok(private::flag(self.0, "leaf flag"))
+    }
+}
+
 /// Builds the leaf; its statement is [`Leg::words`].
 pub(crate) fn circuit() -> Result<Built, Error> {
     let mut builder = engine::builder()?;
@@ -361,22 +536,27 @@ pub(crate) fn circuit() -> Result<Built, Error> {
 }
 
 fn statement(g: &mut CircuitBuilder<E>) -> Result<Vec<ExprId>, Error> {
-    // Witness, in `Attested::witness` order.
-    let key = g.private(KEY_WORDS);
-    base_words(g, &key)?;
-    let signature = g.private(xmss::SIGNATURE_WORDS);
-    base_words(g, &signature)?;
-    let (uid, _) = g.bytes(UID_BYTES)?;
-    let (opaque, _) = g.bytes(OPAQUE.len() * HASH_BYTES)?;
-    let (uuid, _) = g.bytes(UUID)?;
-    let (request_blinder, _) = g.bytes(BLINDER_BYTES)?;
-    let (stream, bits) = g.bytes(STREAM)?;
-    let mask = g.flags(MAX_RESPONSE);
-    let chunked = g.flags(1);
-    let chunked = chunked.first().copied().ok_or(Error::Shape)?;
-    let inverses = g.private(MAX_RESPONSE - FIRST_BODY);
-    let selections = FIELDS
-        .map(|_| [vec![ExprId::ZERO], g.flags(MAX_RESPONSE - 1)].concat())
+    let Inputs {
+        key,
+        signature,
+        uid: Bytes { values: uid, .. },
+        opaque: Bytes { values: opaque, .. },
+        uuid: Bytes { values: uuid, .. },
+        request_blinder: Bytes {
+            values: request_blinder,
+            ..
+        },
+        stream: Bytes {
+            values: stream,
+            bits,
+        },
+        mask,
+        chunked,
+        inverses,
+        selections,
+    } = LAYOUT.visit(&mut Allocate(g))?;
+    let selections = selections
+        .map(|run| [vec![ExprId::ZERO], run].concat())
         .to_vec();
 
     // The notary key's attestation field hash names the notary in the statement.

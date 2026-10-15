@@ -38,7 +38,7 @@ circuit fixes how.
 | Page            | listed transactions, header names, logs, verdicts                                | header values, records, proofs   |
 | data dir (0700) | records (full responses), leaves, roots, each 0600                               | session headers                  |
 
-## Notarization (`src/notary.rs`, `src/http.rs`)
+## Notarization (`host/src/notary.rs`, `host/src/http.rs`)
 
 - Request: a HAR 1.2 request `{ method, url, headers: [{ name, value, _attached? }], postData? }`
   (other HAR fields ignored), `https` only; `host`, `content-type`, `content-length`,
@@ -82,8 +82,12 @@ The signed header is `uid16 ‖ 0⁴ ‖ 0x80 ‖ 0x20 ‖ root32`; the XMSS mes
 
 Commit-and-prove over the tlsn commitments (DECO's two-stage parsing). Private witness: key,
 signature, uid, field hashes 1–3, UUID, both blinders, the response stream
-`response ‖ blinder ‖ 0x01 ‖ 0*` (8209 bytes), a prefix mask, the framing bit, zero-test inverses,
-and five one-hot positions. Constraints:
+`response ‖ blinder ‖ 0x01 ‖ 0*` (8209 bytes), a prefix mask, the framing bit, zero-test inverses
+from byte 4 (the earliest body byte), and five one-hot positions. `Inputs::visit` orders them
+for both the circuit and the witness. Each is allocated with the constraint that creates it
+(`core/src/private.rs`): words through coefficient lookups, bytes through their 8-bit
+decomposition, flags through bool checks, so no builder simplification leaves one uncreated.
+Constraints:
 
 1. Field hashes 0, 5, 6, the Merkle root, the header, and XMSS verified in-circuit (Drake et al.,
    ePrint 2025/055: 39 chains, base 16, target sum 293, lifetime 2¹⁰).
@@ -182,7 +186,7 @@ cargo install --git https://github.com/visoftlabs/paymoney
 printf '\053\000\000\000{"jsonrpc":"2.0","id":1,"method":"install"}' | paymoney | tail -c +5
 ```
 
-From a terminal, a message is framed by hand: its JSON's byte length as a native-endian `u32`
+From a checkout, `cargo install --path host`. From a terminal, a message is framed by hand: its JSON's byte length as a native-endian `u32`
 (`\053\000\000\000` is 43), then the JSON; `tail -c +5` drops the reply's prefix.
 
 A `request` lists the leaf's head first, then each session header as `{ name, _attached: true }`;
