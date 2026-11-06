@@ -12,10 +12,9 @@ jobs:
   # GitHub-hosted: the platform's runners never take a public repository's jobs.
   check:
     runs-on: ubuntu-24.04
-    # Provisional: a clean release build and test take 102 s on 16 cores (measured 2026-11-06); the
-    # bound leaves room for clippy on a 4-core runner and turns a starved build into a failure
-    # instead of a 6-hour hold. The first run here measures it.
-    timeout-minutes: 60
+    # The job took 10.5 min here (measured 2026-11-06); triple that turns a starved build into a
+    # failure instead of a 6-hour hold.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

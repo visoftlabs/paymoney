@@ -183,12 +183,15 @@ Support/finance.paymoney` on macOS, `$XDG_DATA_HOME/finance.paymoney` (default `
 on Linux.
 
 ```sh
-cargo install --git https://github.com/visoftlabs/paymoney
-printf '\053\000\000\000{"jsonrpc":"2.0","id":1,"method":"install"}' | paymoney | tail -c +5
+cargo install --locked --git https://github.com/visoftlabs/paymoney
+printf '\053\000\000\000{"jsonrpc":"2.0","id":1,"method":"install"}' | paymoney >/dev/null
 ```
 
-From a checkout, `cargo install --path host`. From a terminal, a message is framed by hand: its JSON's byte length as a native-endian `u32`
-(`\053\000\000\000` is 43), then the JSON; `tail -c +5` drops the reply's prefix.
+From a checkout, `cargo install --locked --path host`; without `--locked`, `cargo install` resolves
+afresh instead of reading `Cargo.lock`. From a terminal, a message is framed by hand: its JSON's
+byte length as a native-endian `u32` (`\053\000\000\000` is 43), then the JSON. Stdout carries
+framed `log` notifications before the reply, so it is discarded; stderr's `host.installed` names
+the manifest.
 
 A `request` lists the leaf's head first, then each session header as `{ name, _attached: true }`;
 Revolut answered 400 to only `cookie`, `x-device-id`, `x-client-version` and
