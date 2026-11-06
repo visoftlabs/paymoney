@@ -814,7 +814,6 @@ fn response(
                 .collect(),
             out_ctl: vec![true; 2],
             return_all_outputs: false,
-            mmcs_index_sum: None,
             absorb_len: 0,
         })?;
         outputs.push(output);

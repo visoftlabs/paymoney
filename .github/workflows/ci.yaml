@@ -1,0 +1,27 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # GitHub-hosted: the platform's runners never take a public repository's jobs.
+  check:
+    runs-on: ubuntu-24.04
+    # Provisional: a clean release build and test take 102 s on 16 cores (measured 2026-11-06); the
+    # bound leaves room for clippy on a 4-core runner and turns a starved build into a failure
+    # instead of a 6-hour hold. The first run here measures it.
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # The toolchain and components rust-toolchain.toml names.
+      - run: rustup toolchain install
+      - run: cargo fmt --check
+      - run: cargo clippy --release --locked --all-targets -- --deny warnings
+      - run: cargo test --release --locked

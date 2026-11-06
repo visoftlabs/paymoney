@@ -204,13 +204,15 @@ this stack resolves them.
 
 ## Forks
 
-Plonky3 is upstream's `0.9.0-rc.1` from crates.io. Each fork's `feat/paymoney` is rebased on an
-unpatched mirror of upstream; consumers reference it by branch and `Cargo.lock` pins the commit.
-A rebase may leave older lockfiles pinning commits no branch reaches.
+Plonky3 is upstream's `0.9.0-rc.2` from crates.io, the release Plonky3-recursion builds on. Each
+fork's `feat/paymoney` is rebased on an unpatched mirror of upstream; consumers reference it by
+branch and `Cargo.lock` pins the commit. A rebase may leave older lockfiles pinning commits no
+branch reaches.
 
 - **Plonky3-recursion** (upstream `main`): `preprocessed_commitment()`.
-- **mpz2**: the Poseidon2-KoalaBear boolean circuit (0.96 M AND gates per permutation) and the VM
-  byte hash.
+- **mpz2** (upstream `dev` at `eaca5f9`, beside the commit tlsn pins; it moves only when tlsn's
+  pin does, never to `dev`'s head): the Poseidon2-KoalaBear boolean circuit (0.96 M AND gates per
+  permutation) and the VM byte hash.
 - **tlsn**: `HashAlgId::POSEIDON2_KOALABEAR` and its commitment arm; public `Body::hash_fields`.
 
 ## Open
@@ -222,9 +224,12 @@ A rebase may leave older lockfiles pinning commits no branch reaches.
 
 ```sh
 cargo fmt --check
-cargo clippy --release --all-targets -- -D warnings
-cargo test --release
+cargo clippy --release --locked --all-targets -- --deny warnings
+cargo test --release --locked
 ```
+
+`ci` (`.github/workflows/ci.yaml`) runs them on every push to `main` and every pull request, on a
+GitHub-hosted runner: the repository is public, and the platform's runners take only private ones.
 
 The one test prepares every circuit (4 s in release): Plonky3-recursion rejects a circuit when
 preparing it, not when building it, so a dependency bump must pass it. The rest of the pipeline
