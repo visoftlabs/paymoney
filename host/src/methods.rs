@@ -8,17 +8,10 @@ use crate::{
     server::{Client, Server},
     store::{self, Store},
 };
-use native_messaging::Scope;
 use paymoney_core::{Aggregate, Amount, Circuits, Key, LegProof, Statement, attestation};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use uuid::Uuid;
-
-/// Chrome's native messaging host name, which the extension connects to.
-const HOST: &str = "finance.paymoney.host";
-/// PROOF: fixed by the public `key` in paymoney-finance's extension manifest: SHA-256 of the DER
-/// key, first 32 hex digits mapped `0–f → a–p`.
-const EXTENSION_ID: &str = "bcohgdaijipkkfnnifeibdbniagkeebc";
 
 #[derive(Deserialize, Serialize)]
 #[serde(
@@ -48,7 +41,6 @@ pub enum Method {
         root: Uuid,
         server: Server,
     },
-    Install,
     #[serde(other)]
     Unknown,
 }
@@ -77,9 +69,6 @@ pub enum Reply {
         summary: Statement,
     },
     Statement(Statement),
-    Installed {
-        manifest: PathBuf,
-    },
 }
 
 impl Method {
@@ -140,9 +129,6 @@ impl Method {
                 let root: Aggregate = store::read(&store.path("roots", &root)?)?;
                 Reply::Statement(submit(&root, &server, client).await?)
             }
-            Method::Install => Reply::Installed {
-                manifest: install()?,
-            },
             Method::Unknown => return Err(Error::UnknownMethod),
         })
     }
@@ -163,22 +149,4 @@ async fn submit(root: &Aggregate, server: &Server, client: &Client) -> Result<St
     };
     let ((), statement) = tokio::try_join!(connection, verdict)?;
     Ok(statement)
-}
-
-/// Registers this binary as Chrome's native messaging host for the extension, for this user.
-fn install() -> Result<PathBuf, Error> {
-    let binary = std::env::current_exe()?;
-    let origin = format!("chrome-extension://{EXTENSION_ID}/");
-    native_messaging::install(
-        HOST,
-        "PayMoney native prover",
-        &binary,
-        &[origin],
-        &[],
-        &["chrome"],
-        Scope::User,
-    )?;
-    let path = native_messaging::manifest_path("chrome", Scope::User, HOST)?;
-    tracing::info!(event.name = "host.installed", file.path = %path.display(), process.executable.path = %binary.display());
-    Ok(path)
 }

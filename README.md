@@ -168,7 +168,6 @@ default. Release builds only: debug builds run Plonky3's serial self-checks.
 | `prove`       | `record`, `legId`   | `{ key, amount }`                                                          |
 | `aggregate`   | `legIds`            | `{ root, summary }`                                                        |
 | `submit`      | `root`, `server`    | the statement the server verified; its RFC 9457 problem as error `data`    |
-| `install`     | —                   | `{ manifest }`: Chrome's native messaging host `finance.paymoney.host`     |
 
 `server` is the PayMoney server: `{ url, certificate? }`, its origin and, for a self-signed
 certificate, that certificate (PEM), then the only root trusted (otherwise Mozilla's roots verify
@@ -183,15 +182,17 @@ Support/finance.paymoney` on macOS, `$XDG_DATA_HOME/finance.paymoney` (default `
 on Linux.
 
 ```sh
-cargo install --locked --git https://github.com/visoftlabs/paymoney
-printf '\053\000\000\000{"jsonrpc":"2.0","id":1,"method":"install"}' | paymoney >/dev/null
+cargo install --locked --git https://github.com/visoftlabs/paymoney --rev <commit>
+paymoney install
 ```
 
-From a checkout, `cargo install --locked --path host`; without `--locked`, `cargo install` resolves
-afresh instead of reading `Cargo.lock`. From a terminal, a message is framed by hand: its JSON's
-byte length as a native-endian `u32` (`\053\000\000\000` is 43), then the JSON. Stdout carries
-framed `log` notifications before the reply, so it is discarded; stderr's `host.installed` names
-the manifest.
+`<commit>` is the one the PayMoney server builds with, which its page shows: the circuits' keys
+come from it, so a binary from any other commit makes roots that server rejects. From a checkout,
+`cargo install --locked --path host`; without `--locked`, `cargo install` resolves afresh instead
+of reading `Cargo.lock`. `paymoney install` registers the binary with Chrome for this user, as the
+native messaging host `finance.paymoney.host` that admits only the extension, and prints the
+manifest's path. Chrome starts the host with the extension's origin as its argument, which
+`host.started` logs as `client.origin`.
 
 A `request` lists the leaf's head first, then each session header as `{ name, _attached: true }`;
 Revolut answered 400 to only `cookie`, `x-device-id`, `x-client-version` and

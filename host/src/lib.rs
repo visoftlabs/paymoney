@@ -1,6 +1,7 @@
 //! PayMoney: notarize Revolut transactions with tlsn, prove each leg, aggregate the proofs. The
 //! `paymoney` binary serves every step as a JSON-RPC 2.0 method on stdio.
 
+pub mod chrome;
 pub mod crypto;
 pub mod http;
 pub mod methods;

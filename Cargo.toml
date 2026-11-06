@@ -19,6 +19,7 @@ p3-circuit-prover = { git = "https://github.com/visoftlabs/Plonky3-recursion", b
 p3-recursion = { git = "https://github.com/visoftlabs/Plonky3-recursion", branch = "feat/paymoney", features = ["parallel"] }
 tlsn = { git = "https://github.com/visoftlabs/tlsn", branch = "feat/paymoney", features = ["mozilla-certs", "hash-poseidon2-koalabear"] }
 
+clap = { version = "4.6.7", features = ["derive"] }
 dirs = "7.0.0"
 futures = "0.3.34"
 hex = "0.4.3"

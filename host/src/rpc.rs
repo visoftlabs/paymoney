@@ -17,6 +17,7 @@ use std::{
     borrow::Cow,
     io::{self, Read, Write},
 };
+use url::Url;
 
 /// Policy: frames from the extension carry ids, headers and small bodies only.
 const MAX_FRAME: usize = 64 * 1024;
@@ -55,11 +56,18 @@ impl Write for Log {
     }
 }
 
-/// Answers each frame on `input` until the browser disconnects.
-pub async fn serve(mut input: impl Read, store: &Store, client: &Client) -> Result<(), Error> {
+/// Answers each frame on `input` until the browser disconnects; `origin` is the extension Chrome
+/// started it for, none from a terminal.
+pub async fn serve(
+    mut input: impl Read,
+    origin: Option<&Url>,
+    store: &Store,
+    client: &Client,
+) -> Result<(), Error> {
     tracing::info!(
         event.name = "host.started",
-        service.version = env!("CARGO_PKG_VERSION")
+        service.version = env!("CARGO_PKG_VERSION"),
+        client.origin = origin.map(Url::as_str),
     );
     while let Some(message) = host::decode_message_opt(&mut input, MAX_FRAME)? {
         if let Some(response) = answer(message.as_bytes(), store, client).await {
