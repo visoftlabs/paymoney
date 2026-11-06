@@ -182,17 +182,16 @@ Support/finance.paymoney` on macOS, `$XDG_DATA_HOME/finance.paymoney` (default `
 on Linux.
 
 ```sh
-cargo install --locked --git https://github.com/visoftlabs/paymoney --rev <commit>
+cargo install --locked --git https://github.com/visoftlabs/paymoney
 paymoney install
 ```
 
-`<commit>` is the one the PayMoney server builds with, which its page shows: the circuits' keys
-come from it, so a binary from any other commit makes roots that server rejects. From a checkout,
+The PayMoney server follows `main`: the circuits' keys come from the commit it builds with, so a
+binary from a commit with other circuits makes roots that server rejects. From a checkout,
 `cargo install --locked --path host`; without `--locked`, `cargo install` resolves afresh instead
 of reading `Cargo.lock`. `paymoney install` registers the binary with Chrome for this user, as the
 native messaging host `finance.paymoney.host` that admits only the extension, and prints the
-manifest's path. Chrome starts the host with the extension's origin as its argument, which
-`host.started` logs as `client.origin`.
+manifest's path.
 
 A `request` lists the leaf's head first, then each session header as `{ name, _attached: true }`;
 Revolut answered 400 to only `cookie`, `x-device-id`, `x-client-version` and

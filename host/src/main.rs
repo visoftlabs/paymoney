@@ -18,10 +18,10 @@ use url::Url;
 struct Cli {
     #[command(subcommand)]
     command: Option<Command>,
-    /// The calling extension's origin, which Chrome passes when it starts the host; the
-    /// manifest's `allowed_origins` admits only PayMoney's.
+    /// The calling extension's origin, which Chrome passes when it starts the host: parsed, then
+    /// unread, since the manifest's `allowed_origins` already admits only PayMoney's.
     #[arg(hide = true)]
-    origin: Option<Url>,
+    _origin: Option<Url>,
 }
 
 #[derive(Subcommand)]
@@ -58,7 +58,6 @@ async fn main() -> Result<(), Error> {
                 .init();
             rpc::serve(
                 std::io::stdin().lock(),
-                cli.origin.as_ref(),
                 &Store::platform()?,
                 &Client::bind()?,
             )
