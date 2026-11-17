@@ -49,8 +49,8 @@ Obligations:
   the native one proves. Required relationships are structural.
 
 _Limit:_ scope "illegal states unrepresentable" to stable domain cores and traveling constraints.
-At an evolving boundary (serialized, persisted, or sent to an older peer) a permissive type parsed
-into a precise one is correct, and a maximally strict wire schema is a defect. See **F**.
+At a peer's evolving boundary (a vendor's API, a client's input) a permissive type parsed into a
+precise one is correct, and a maximally strict wire schema is a defect.
 
 ### P2 · Boundary
 
@@ -208,9 +208,9 @@ P1 governs the in-memory value; F governs its persistence.
 
 - **Derived data** (rebuildable from source): one canonical definition, dropped and recreated on
   mismatch. No migration, version branch, shim or deprecated-but-live API.
-- **Durable data**: accretion-only. Fields are added, never repurposed; old fields are read, not
-  required; removal is expand-then-contract. The persisted type is permissive at the edge and
-  parsed into a precise one in memory (P2).
+- **Durable data**: one canonical format, read exactly as written: no legacy read, old variant or
+  migration. A change that breaks it ships with a wipe of that data and of every secret derived
+  over it, approved at deploy.
 
 ---
 
@@ -240,15 +240,15 @@ P1 governs the in-memory value; F governs its persistence.
 - **Named, not explained.** A module's one-line doc names its structure ("a Mealy machine").
 - **Shape, not hierarchy.** A structure shows in names, signatures and laws, never in an
   abstraction built to display it (Code Form: composition over abstraction).
-- **Laws are witnessed.** A law the system relies on is a workflow assertion: by generator where
-  the domain is unbounded, and an invariance as a metamorphic relation (Testing).
+- **Laws are witnessed.** A law the system relies on is a workflow assertion (Testing), an
+  invariance a metamorphic relation.
 
 ---
 
 ## Code Form
 
-These shape expression and add no runtime semantics. Paths in documentation are relative to the
-repository root; host-specific absolute paths are supplied at setup, never hard-coded.
+Paths in documentation are relative to the repository root; host-specific absolute paths are
+supplied at setup, never hard-coded.
 
 - **Immutable and canonical.** Mutation is explicit and scoped; persist irreducible data, derive
   the rest on read.
@@ -273,7 +273,8 @@ repository root; host-specific absolute paths are supplied at setup, never hard-
 - **Grammars are regexes.** Every bespoke string or byte grammar is a named regex in one patterns
   module per package (`patterns.rs`, `patterns.py`); standard formats use their parsers.
 - **One workspace per language,** rooted at the repository root (Cargo `[workspace]`, npm
-  `workspaces`, uv `[tool.uv.workspace]`), with one lockfile and one toolchain pin.
+  `workspaces`, uv `[tool.uv.workspace]` once there is a member), with one lockfile and one
+  toolchain pin.
 - **Centralized dependencies.** Each dependency is declared once at the workspace root; a member
   pins differently only when forced, justified on the line. Default features stay on unless one
   compiles native code or a correctness feature must be added, each with its reason.
@@ -315,9 +316,8 @@ Few tests, well designed.
 
 ## Verification
 
-`README.md` owns check commands, tool versions, test scopes and environment limits. Run the checks
-relevant to the change and report only what ran. Constructors, input boundaries, ownership,
-confidentiality, data evolution and structural laws still need review.
+`README.md` owns check commands, tool versions, test scopes and environment limits. Constructors,
+input boundaries, ownership, confidentiality, data evolution and structural laws still need review.
 
 ## Provenance
 
